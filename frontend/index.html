@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Entity Research Aggregator</title>
+<link rel="stylesheet" href="/style.css?v=7">
+</head>
+<body>
+<header>
+  <div>
+    <h1>Entity <span>Research</span> Aggregator</h1>
+    <div class="sub">Paste every link for one entity — websites, YouTube, Instagram, Facebook.
+      Content is scraped, screenshots read by a local vision model, and everything
+      synthesised into one dossier. All models run locally.</div>
+  </div>
+</header>
+
+<!-- ---------------------------------------------------------------- intake -->
+<section id="intake" class="card">
+  <label class="lbl" for="entity">Entity name <span class="opt">(optional — inferred if blank)</span></label>
+  <input id="entity" type="text" placeholder="e.g. NASA" spellcheck="false">
+
+  <label class="lbl">Links</label>
+  <div id="links"></div>
+  <div class="row">
+    <button id="addlink" class="ghost small">+ Add link</button>
+    <span class="hint">Each link is collected by the matching collector. Instagram/Facebook are best-effort.</span>
+  </div>
+
+  <div class="row submit-row">
+    <button id="go">Build dossier</button>
+    <span class="hint" id="eta">~2 min per source (scrape → vision → synthesis)</span>
+  </div>
+</section>
+
+<div id="error" class="hidden"></div>
+
+<!-- -------------------------------------------------------------- progress -->
+<section id="progress" class="card hidden">
+  <div class="row between">
+    <h2>Job <code id="jobid"></code></h2>
+    <span id="elapsed" class="hint"></span>
+  </div>
+  <div class="stages">
+    <div class="stage" data-stage="queued"><span class="dot"></span>Queued</div>
+    <div class="stage" data-stage="collecting"><span class="dot"></span>Collecting</div>
+    <div class="stage" data-stage="analyzing"><span class="dot"></span>Vision</div>
+    <div class="stage" data-stage="synthesizing"><span class="dot"></span>Synthesis</div>
+    <div class="stage" data-stage="done"><span class="dot"></span>Done</div>
+  </div>
+  <div id="stagenote" class="hint"></div>
+</section>
+
+<!-- ---------------------------------------------------------------- result -->
+<section id="result" class="hidden">
+  <div class="card">
+    <div class="row between">
+      <h2>Dossier</h2>
+      <div class="row">
+        <button id="download" class="ghost small">Download .md</button>
+        <button id="downloadpdf" class="ghost small" title="Server-generated PDF">Download PDF</button>
+        <button id="printpdf" class="ghost small" title="Browser print dialog — choose 'Save as PDF'">Print</button>
+        <button id="toggleraw" class="ghost small">View raw markdown</button>
+      </div>
+    </div>
+    <article id="dossier"></article>
+    <pre id="rawmd" class="hidden"></pre>
+  </div>
+
+  <div class="card">
+    <h2>Sources <span class="hint">— every artifact, inspectable</span></h2>
+    <div id="sources"></div>
+  </div>
+</section>
+
+<!-- ----------------------------------------------------------- recent jobs -->
+<section id="recentwrap" class="card hidden">
+  <h2>Recent jobs</h2>
+  <div id="recent"></div>
+</section>
+
+<script src="/app.js?v=7"></script>
+</body>
+</html>

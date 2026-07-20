@@ -1,0 +1,13 @@
+.env
+.venv/
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local llama.cpp binaries + model runtime — download separately, see README.
+tools/llamacpp/
+
+# Unrelated local scratch content, not part of this project.
+Outputs/
+plan_*.txt

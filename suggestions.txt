@@ -1,0 +1,105 @@
+========================================================================
+ ENTITY RESEARCH AGGREGATOR — FUTURE DIRECTION / SUGGESTIONS
+========================================================================
+Captured 2026-07-16. Ideas for expanding the tool, grouped by type, with
+a rough priority. "Idc about time" — so this is the full menu, not a
+minimal one. Nothing here is built yet unless noted.
+
+Current state: multi-platform scraping (website, YouTube API, Instagram +
+Facebook best-effort, LinkedIn bespoke JSON-LD) -> local vision (Qwen) ->
+local grounded synthesis (gpt-oss) -> Markdown + server-side PDF dossier.
+
+
+------------------------------------------------------------------------
+1. MORE SOURCES
+------------------------------------------------------------------------
+[HIGH] GitHub / GitLab (bespoke)
+  - Free, sanctioned REST API (no ToS tightrope like the socials).
+  - Pull: org/user profile, repo list, languages, stars, README text,
+    top contributors, activity.
+  - Best effort-to-payoff ratio on this whole list. Great for any tech
+    entity. RECOMMENDED FIRST.
+
+[HIGH] App stores (Apple App Store / Google Play)
+  - For any company with an app: description, ratings, review counts,
+    update cadence, "what's new" notes.
+  - Strong signal for product/business inference; scrapeable cleanly.
+
+[HIGH] News / press coverage
+  - Google News RSS or a search feed for the entity name -> recent
+    headlines. Turns a static profile into "what's happening now."
+  - Big qualitative upgrade to the dossier.
+
+[MED] Crunchbase / company registries
+  - Funding, founding date, headcount. Mostly paywalled/gated ->
+    best-effort only. Lower priority.
+
+[LOW] X/Twitter, Reddit, TikTok
+  - Probed live: logged-out payoff is thin and fragile. TikTok is
+    geo-blocked from this machine (India). Skip unless specifically needed.
+
+
+------------------------------------------------------------------------
+2. DEPTH ON EXISTING SOURCES
+------------------------------------------------------------------------
+- YouTube beyond recent uploads: pull most-VIEWED videos (not just
+  newest), aggregate top-comment themes across videos, or full transcripts
+  of the top N for a real "what do they talk about" analysis.
+- Website deeper crawl: pricing-page detection, team/leadership
+  extraction, /blog harvesting for content-strategy signal. (Currently
+  follows ~5 allowlisted sub-pages.)
+- Cross-source entity resolution: detect that LinkedIn "NASA", YouTube
+  "@NASA" and nasa.gov are the SAME entity; note contradictions (e.g.
+  follower counts differing across platforms).
+
+
+------------------------------------------------------------------------
+3. SMARTER SYNTHESIS  (highest quality-per-effort — spend here)
+------------------------------------------------------------------------
+[HIGH] Comparison mode
+  - Run 2-3 entities -> a COMPARATIVE dossier: "A vs B: positioning,
+    audience, scale." Small synthesis-prompt change + a multi-job view.
+  - Unlocks competitive research as a new use case.
+
+[HIGH] Custom research questions
+  - Let the user type a focus ("enterprise or consumer? pricing model?")
+    and have synthesis answer THAT specifically, not just the generic
+    template. Biggest quality jump per unit effort.
+
+[MED] Structured JSON output alongside the prose dossier
+  - Makes the tool an API you can pipe into a spreadsheet/DB, not just a
+    document.
+
+[MED] Confidence-driven follow-up
+  - When an inference is "low confidence — no data," auto-suggest which
+    additional source would resolve it.
+
+
+------------------------------------------------------------------------
+4. PRODUCT / UX
+------------------------------------------------------------------------
+- Scheduled re-runs & change tracking: re-scrape weekly, diff dossiers,
+  surface "what changed" (new posts, follower growth, job listings).
+  Turns a snapshot tool into a monitoring tool.
+- Persistence & search: a searchable/filterable library of past dossiers
+  (beyond the current "recent jobs" list).
+- Export polish: shareable HTML export; a one-page executive-summary
+  variant alongside the full dossier.
+
+
+------------------------------------------------------------------------
+5. ROBUSTNESS  (unglamorous but real)
+------------------------------------------------------------------------
+- Retry/proxy layer for social: honest fix for IG/FB/LinkedIn blocking;
+  even simple retry-with-backoff helps.
+- Per-collector health in the UI: show WHICH method succeeded per source
+  so the user trusts the data.
+
+
+------------------------------------------------------------------------
+TOP 3 TO DO NEXT (recommended order)
+------------------------------------------------------------------------
+  1. GitHub collector        — cleanest win, real value, no ToS risk.
+  2. Custom research questions — generic dossier -> targeted one.
+  3. Comparison mode          — new use case, architecture nearly supports it.
+========================================================================
