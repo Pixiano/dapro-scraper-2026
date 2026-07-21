@@ -1,5 +1,7 @@
 # 🕵️ Entity Research Aggregator
 
+**TL;DR:** A local-first research tool. Give it links to a YouTuber/creator/company across 15+ platforms, and it scrapes each with a purpose-built collector, runs a local vision model over every screenshot, and synthesizes everything with a local reasoning LLM into one grounded Markdown/PDF dossier — every inferred claim carries a confidence level and a cited source. Python/FastAPI backend, async job queue, SQLite, Playwright, llama.cpp. 214 tests, fully offline. Nothing leaves the machine except the actual scrape requests and the free YouTube API.
+
 > *"I want to know everything about this YouTuber/creator/small company, but I refuse to open 16 tabs."* — me, constantly
 
 I paste a bunch of links — their website, YouTube, Instagram, GitHub, Patreon, that Linktree they definitely forgot to update — and this thing scrapes all of it, points a **local vision model** at every screenshot, hands the whole pile to a **local LLM**, and hands me back one Markdown (or PDF, I'm fancy now) research dossier with an actual "here's how they probably make money" section that cites its sources like a functioning adult.
@@ -7,6 +9,38 @@ I paste a bunch of links — their website, YouTube, Instagram, GitHub, Patreon,
 Everything runs **on my own machine**. No data leaves my PC except the actual HTTP requests to the actual websites I asked it to look at, plus the (optional, free, quota-capped) YouTube Data API. My GPU does the thinking. My GPU also gets tired, so I try to be nice to it.
 
 <sub>Yes, this README has jokes in it. Yes, it also has real documentation. It's giving "built a whole app in one sitting and is still a little feral about it" energy, and honestly? Not sorry.</sub>
+
+---
+
+## Screenshots
+
+**The intake form.** Paste links, get instant platform auto-detection per link.
+![Empty intake form](docs/screenshots/01-intake.png)
+
+**Links filled in — badges auto-detect the platform per URL** (website / YouTube / GitHub / LinkedIn, etc.), so I know at a glance which collector will run on each one.
+![Intake form with links filled in and platform badges showing](docs/screenshots/02-intake-filled.png)
+
+**A real generated dossier** — this one's from an actual 15-source run, all NASA.
+![Top of a generated research dossier, showing the title and Overview section](docs/screenshots/03-dossier-overview.png)
+
+**The "Inferred Insights" section** — the actual point of the whole project. Every claim is tagged with a confidence level and a cited quote from a real source. No claim gets in without receipts.
+![Inferred Insights section with confidence-tagged, source-cited claims](docs/screenshots/04-inferred-insights.png)
+
+**Every artifact is inspectable** — raw extracted text and the local vision model's actual read on every screenshot, including this genuinely delightful description of a 404 page.
+![Expanded source card showing extracted text and a vision-model note describing a 404 page](docs/screenshots/05-source-inspection.png)
+
+---
+
+## Skills demonstrated
+
+Mostly here for the "what does this actually show I can do" crowd — recruiters, future-me, whoever:
+
+- **Backend architecture:** FastAPI, async job orchestration with a single-worker queue (deliberate — one GPU, one model resident at a time), SQLite for job state/caching/quota tracking.
+- **LLM integration & prompt engineering:** local model orchestration via llama.cpp, structured/grounded output design (every synthesized claim requires cited evidence — no ungrounded generation), and role-aware prompting (different instructions depending on whether text was already scraped or only exists as pixels).
+- **Web scraping at scale:** 15 platform-specific collectors using whatever's actually reliable per site — REST APIs, RSS, embedded JSON blobs, JSON-LD, and headless-browser rendering — plus a generic fallback so no site is unsupported.
+- **Security-conscious design:** path-traversal-safe file serving, rate limiting, no credential/login automation anywhere, sanitized error handling (raw errors never reach either the AI prompt or the end document).
+- **Testing discipline:** 214 tests, 100% offline/mocked, sub-2-second full suite run.
+- **Debugging under real constraints:** several of the bugs in the "war stories" section below involved reverse-engineering undocumented third-party JSON shapes (Patreon) and diagnosing silent failures in a local inference stack with no error messages to go on.
 
 ---
 
