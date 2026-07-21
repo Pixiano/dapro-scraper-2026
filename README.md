@@ -150,7 +150,7 @@ Every response follows `{data, cached, fetched_at, quota}`; every error follows 
 - **TikTok** isn't supported. It's geo-blocked from my dev machine and thin logged-out anyway. Recognized as a valid future addition, not implemented.
 - **No server-side video/audio analysis.** It reads pixels and text, not sound.
 - **This is a research tool, not a mass-surveillance tool.** It's built for looking up one entity at a time from links you already have — please don't point it at thousands of people. Also: be a decent human about what you do with the output.
-- **There's no LICENSE file yet.** That's a deliberate blank — check with me before assuming you can redistribute this.
+- **Licensed MIT.** Use it, fork it, remix it, sell it if you're bold — just keep the copyright notice. No warranty, no liability, standard stuff.
 
 See [`suggestions.txt`](suggestions.txt) for the "here's what I'd build next" list (GitHub deeper-dive, comparison mode for 2+ entities, custom research questions, scheduled re-runs to track changes over time, and more).
 
