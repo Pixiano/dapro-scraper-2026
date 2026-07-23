@@ -22,4 +22,9 @@ jobs:
 
       - name: Run tests
         run: pytest -q
-        
+
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Type check (mypy)
+        run: mypy
