@@ -1,3 +1,4 @@
+# CI: offline pytest suite + mypy on every push/PR.
 name: tests
 
 on:
