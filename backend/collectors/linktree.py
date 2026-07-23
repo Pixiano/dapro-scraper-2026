@@ -89,7 +89,7 @@ def _discovered_links(soup: BeautifulSoup, page_url: str) -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
     for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
+        href = str(a["href"]).strip()
         if not href or href.lower().startswith(_SKIP_SCHEMES):
             continue
         if not href.lower().startswith(("http://", "https://")):

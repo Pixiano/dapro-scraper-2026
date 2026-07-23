@@ -71,7 +71,9 @@ def fetch_transcript(video_id: str) -> tuple[str | None, str | None]:
                 fetched = next(iter(tl)).fetch()
             parts = [s.text for s in fetched]
         except AttributeError:  # v0.x static API
-            data = YouTubeTranscriptApi.get_transcript(
+            data = YouTubeTranscriptApi.get_transcript(  # type: ignore[attr-defined]
+                # Only exists on the pre-1.x static API; deliberately reached via
+                # the AttributeError fallback above when a v0.x package is installed.
                 video_id, languages=["en", "en-US", "en-GB", "hi"])
             parts = [d["text"] for d in data]
         text = " ".join(p.strip() for p in parts if p and p.strip())
@@ -140,7 +142,7 @@ def _video_content(art: SourceArtifact, client: httpx.Client, videos: list[dict]
         if desc:
             art.text_blocks.append({"label": f"video: {title}",
                                     "text": _clip(desc, 4000)})
-        if i < settings.yt_transcript_videos:
+        if vid and i < settings.yt_transcript_videos:
             text, err = fetch_transcript(vid)
             if text:
                 art.text_blocks.append(

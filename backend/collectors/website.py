@@ -51,7 +51,7 @@ def extract_text(html: str) -> tuple[str, dict]:
 
     def meta(**attrs):
         el = soup.find("meta", attrs=attrs)
-        return (el.get("content") or "").strip() if el else ""
+        return str(el.get("content") or "").strip() if el else ""
 
     facts = {k: v for k, v in {
         "title": (soup.title.string or "").strip() if soup.title and soup.title.string else "",
@@ -78,7 +78,7 @@ def subpage_links(html_or_soup, base_url: str) -> list[tuple[str, str]]:
     host = urlparse(base_url).netloc.lower().removeprefix("www.")
     found: dict[str, str] = {}
     for a in soup.find_all("a", href=True):
-        absu = urljoin(base_url, a["href"].strip()).split("#")[0]
+        absu = urljoin(base_url, str(a["href"]).strip()).split("#")[0]
         pu = urlparse(absu)
         if pu.scheme not in ("http", "https"):
             continue

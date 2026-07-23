@@ -55,7 +55,7 @@ def _derive_genre(channel: dict, videos: list[dict], cats: dict) -> dict:
         cid = (v.get("snippet") or {}).get("categoryId")
         if cid:
             counts[cid] = counts.get(cid, 0) + 1
-    modal = max(counts, key=counts.get) if counts else None
+    modal = max(counts, key=lambda k: counts[k]) if counts else None
     return {"topics": topics, "modalCategoryId": modal, "modalCategoryName": cats.get(modal)}
 
 
@@ -87,7 +87,7 @@ async def _fetch_upload_page(uploads_id: str, page_token: str | None, cats: dict
         raise
     items = pi.get("items") or []
     ids = [it["contentDetails"]["videoId"] for it in items]
-    videos = []
+    videos: list[dict] = []
     if ids:
         v = await client.api_get("videos", part=VIDEO_PARTS, id=",".join(ids), maxResults=50)
         videos = v.get("items") or []

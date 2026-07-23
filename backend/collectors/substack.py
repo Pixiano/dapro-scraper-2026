@@ -73,9 +73,10 @@ def _screenshot(url: str, job_dir: Path, art: SourceArtifact) -> None:
 def _parse_items(soup: BeautifulSoup, cap: int) -> list[dict]:
     items = []
     for it in soup.find_all("item")[:cap]:
-        title = (it.find("title").get_text(strip=True) if it.find("title") else "").strip()
-        link = (it.find("link").get_text(strip=True) if it.find("link") else "").strip()
-        pub = (it.find("pubDate").get_text(strip=True) if it.find("pubDate") else "").strip()
+        title_el, link_el, pub_el = it.find("title"), it.find("link"), it.find("pubDate")
+        title = (title_el.get_text(strip=True) if title_el else "").strip()
+        link = (link_el.get_text(strip=True) if link_el else "").strip()
+        pub = (pub_el.get_text(strip=True) if pub_el else "").strip()
         body_el = it.find("encoded") or it.find("description")
         body = _html_to_text(body_el.get_text() if body_el else "")
         items.append({"title": title, "link": link, "date": pub, "body": body})

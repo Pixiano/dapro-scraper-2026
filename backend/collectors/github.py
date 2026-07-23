@@ -93,7 +93,7 @@ def collect(url: str, job_dir: Path) -> SourceArtifact:
             if rr.status_code == 200:
                 repos = rr.json()
                 if isinstance(repos, list) and repos:
-                    langs = Counter()
+                    langs: Counter[str] = Counter()
                     lines = []
                     for repo in repos:
                         name = repo.get("name") or ""

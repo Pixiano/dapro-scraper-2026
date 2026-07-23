@@ -160,6 +160,14 @@ Open `http://localhost:8123`. Paste links. Click the big red button. Go get a co
 
 214 tests, fully offline (everything's mocked — no real network calls, no GPU spin-up), runs in under 2 seconds. If the test suite ever takes suspiciously longer than that, something snuck a real network/model call into a unit test again. I've caught myself doing this more than once.
 
+**Live integration tests.** `tests/test_live_integration.py` holds a handful of tests marked `@pytest.mark.live` that hit the real thing instead of mocks — a real Playwright/Chromium fetch of `example.com`, a real GitHub API call, a real YouTube API call (skipped cleanly if no key is configured). `pytest.ini` excludes them by default (`addopts = -m "not live"`), so they never run in CI and never slow down the offline suite above. Run them explicitly with:
+
+```powershell
+.venv\Scripts\python -m pytest -m live
+```
+
+They need real network access and (for the website/GitHub collectors) an installed Chromium (`playwright install chromium`) — expect them to take ~15-20 seconds, not milliseconds.
+
 ---
 
 ## API surface, for the curious / the automators

@@ -41,7 +41,7 @@ def encode_image(path: str | Path) -> tuple[str, str]:
     from PIL import Image
 
     p = Path(path)
-    img = Image.open(p)
+    img: Image.Image = Image.open(p)
     if max(img.size) > MAX_IMAGE_EDGE:
         img = img.convert("RGB")
         scale = MAX_IMAGE_EDGE / max(img.size)

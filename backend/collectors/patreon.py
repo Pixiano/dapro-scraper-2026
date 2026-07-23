@@ -215,8 +215,8 @@ def _extract_patreon(blobs: list[dict]) -> dict:
                         if not isinstance(item, dict):
                             continue
                         try:
-                            name = next((item.get(k) for k in _TIER_NAME_KEYS
-                                        if isinstance(item.get(k), str) and item.get(k).strip()), None)
+                            name = next((v for k in _TIER_NAME_KEYS
+                                        if isinstance(v := item.get(k), str) and v.strip()), None)
                             if not name:
                                 continue
                             price_raw = next((item.get(k) for k in _TIER_PRICE_KEYS
