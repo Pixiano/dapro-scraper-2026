@@ -4,9 +4,9 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Python 3.13](https://img.shields.io/badge/python-3.13-blue.svg)
 
-**TL;DR:** A local-first research tool. Give it links to a YouTuber/creator/company across 15+ platforms, and it scrapes each with a purpose-built collector, runs a local vision model over every screenshot, and synthesizes everything with a local reasoning LLM into one grounded Markdown/PDF dossier — every inferred claim carries a confidence level and a cited source. Python/FastAPI backend, async job queue, SQLite, Playwright, llama.cpp. 214 tests, fully offline. Nothing leaves the machine except the actual scrape requests and the free YouTube API.
-
 > *"I want to know everything about this YouTuber/creator/small company, but I refuse to open 16 tabs."* — me, constantly
+
+**TL;DR:** A local-first research tool. Give it links to a YouTuber/creator/company across 15+ platforms, and it scrapes each with a purpose-built collector, runs a local vision model over every screenshot, and synthesizes everything with a local reasoning LLM into one grounded Markdown/PDF dossier — every inferred claim carries a confidence level and a cited source. Python/FastAPI backend, async job queue, SQLite, Playwright, llama.cpp. 214 tests, fully offline. Nothing leaves the machine except the actual scrape requests and the free YouTube API.
 
 I paste a bunch of links — their website, YouTube, Instagram, GitHub, Patreon, that Linktree they definitely forgot to update — and this thing scrapes all of it, points a **local vision model** at every screenshot, hands the whole pile to a **local LLM**, and hands me back one Markdown (or PDF, I'm fancy now) research dossier with an actual "here's how they probably make money" section that cites its sources like a functioning adult.
 
