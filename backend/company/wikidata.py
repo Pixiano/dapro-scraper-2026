@@ -4,6 +4,7 @@ its product/subsidiary categories. Live APIs only, no LLM.
 Fail soft: network/API errors are appended to `errors` and the caller gets
 whatever was resolved, never an exception."""
 
+import re
 from datetime import date
 from urllib.parse import quote
 
@@ -42,10 +43,19 @@ def _get(url: str, errors: list[str], **params) -> dict:
         return {}
 
 
+COMPANY = re.compile(r"\b(company|corporation|conglomerate|organi[sz]ation|enterprise|"
+                     r"firm|manufacturer|developer|publisher|studio|brand|startup)\b", re.I)
+
+
 def search(name: str, errors: list[str]) -> str | None:
+    """Top hit, preferring one described as a company ("Netflix" the service
+    ranks above Netflix the media company)."""
     data = _get(API, errors, action="wbsearchentities", search=name,
-                language="en", type="item", limit=1, format="json")
+                language="en", type="item", limit=5, format="json")
     hits = data.get("search") or []
+    for h in hits:
+        if COMPANY.search(h.get("description") or ""):
+            return h["id"]
     return hits[0]["id"] if hits else None
 
 
@@ -55,16 +65,17 @@ def get_entities(ids: list[str], errors: list[str]) -> dict[str, dict]:
     for i in range(0, len(ids), 50):
         data = _get(API, errors, action="wbgetentities", ids="|".join(ids[i:i + 50]),
                     props="labels|descriptions|claims|sitelinks",
-                    languages="en", sitefilter="enwiki", format="json")
+                    languages="en|mul", sitefilter="enwiki", format="json")
         out.update({k: v for k, v in (data.get("entities") or {}).items()
                     if "missing" not in v})
     return out
 
 
 def claim_values(ent: dict, pid: str) -> list:
-    """Values of a property, preferred rank first, deprecated dropped."""
+    """Values of a property, preferred rank first; deprecated and ended
+    (P582 end-time qualifier, e.g. a sold subsidiary) dropped."""
     claims = [c for c in (ent.get("claims") or {}).get(pid, [])
-              if c.get("rank") != "deprecated"]
+              if c.get("rank") != "deprecated" and "P582" not in (c.get("qualifiers") or {})]
     claims.sort(key=lambda c: c.get("rank") != "preferred")
     vals = []
     for c in claims:
@@ -77,7 +88,10 @@ def claim_values(ent: dict, pid: str) -> list:
 
 
 def label(ent: dict) -> str:
-    return (ent.get("labels") or {}).get("en", {}).get("value") or ent.get("id", "")
+    # Wikidata now stores many labels only under "mul" (all languages), e.g. Gmail.
+    labels = ent.get("labels") or {}
+    return ((labels.get("en") or labels.get("mul") or {}).get("value")
+            or ent.get("id", ""))
 
 
 def enwiki(ent: dict) -> str | None:
@@ -135,7 +149,8 @@ def resolve(name: str, top: int = 5, today: date | None = None) -> dict:
     # most-viewed subsidiary (Google) and merge its links + products.
     child = None
     ent_links = links(ent)
-    if not claim_values(ent, "P1056") or not any(ent_links[LINKS[p][0]] for p in SOCIAL):
+    # Socials only: Tesla has no P1056 but is no holding company (was -> SolarCity).
+    if not any(ent_links[LINKS[p][0]] for p in SOCIAL):
         subs = [q for q in claim_values(ent, "P355") if q in cand_ents]
         if subs:
             child = cand_ents[max(subs, key=lambda q: views.get(q, 0))]
@@ -149,9 +164,12 @@ def resolve(name: str, top: int = 5, today: date | None = None) -> dict:
 
     cats: list[dict] = []
     for q, e in cand_ents.items():
-        # ponytail: P279 (subclass-of) marks generic classes like "search engine";
-        # a real product is an instance (P31). Heuristic — revisit if it drops real products.
-        if child and q == child["id"] or not enwiki(e) or claim_values(e, "P279"):
+        # ponytail: P279 (subclass-of) without a manufacturer/developer (P176/P178)
+        # marks generic classes like "smartphone"; product lines (iPhone, Windows)
+        # carry P279 too but name their maker. Heuristic.
+        generic = claim_values(e, "P279") and not (claim_values(e, "P176")
+                                                   or claim_values(e, "P178"))
+        if child and q == child["id"] or not enwiki(e) or generic:
             continue
         cats.append({"qid": q, "label": label(e), "enwiki": enwiki(e),
                      "pageviews": views.get(q, 0)})
@@ -160,8 +178,9 @@ def resolve(name: str, top: int = 5, today: date | None = None) -> dict:
     ref_ids = claim_values(ent, "P159")[:1] + claim_values(ent, "P452")[:3]
     refs = get_entities(ref_ids, errors) if ref_ids else {}
     founded = claim_values(ent, "P571")
-    own = {qid, *claim_values(ent, "P355"), *claim_values(ent, "P749"),
-           *claim_values(ent, "P127")}
+    # P127 (owned by) is skipped: for public companies it lists shareholders
+    # (Vanguard, BlackRock), which must not be filtered out as "self".
+    own = {qid, *claim_values(ent, "P355"), *claim_values(ent, "P749")}
     if child:
         own |= {child["id"], *claim_values(child, "P355")}
 
@@ -170,7 +189,8 @@ def resolve(name: str, top: int = 5, today: date | None = None) -> dict:
         "label": label(ent),
         "description": (ent.get("descriptions") or {}).get("en", {}).get("value"),
         "wikidata_url": f"https://www.wikidata.org/wiki/{qid}",
-        "founded": founded[0].lstrip("+")[:10] if founded else None,
+        # "+2007-00-00T..." is year precision -> "2007"
+        "founded": founded[0].lstrip("+")[:10].replace("-00", "") if founded else None,
         "headquarters": [label(refs[q]) for q in claim_values(ent, "P159")[:1] if q in refs],
         "industries": [label(refs[q]) for q in claim_values(ent, "P452")[:3] if q in refs],
         "links": ent_links,

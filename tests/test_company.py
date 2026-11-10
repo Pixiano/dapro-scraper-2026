@@ -65,6 +65,42 @@ def test_resolve_descends_into_child_and_ranks(monkeypatch):
     assert {"QA", "QG", "QW", "QY"} <= set(r["own_entities"])
 
 
+def test_claim_values_drops_ended_and_label_mul_fallback():
+    ended = _claim("QOld")
+    ended["qualifiers"] = {"P582": [{}]}
+    e = _ent("Q1", "x", P355=[ended, _claim("QNow")])
+    assert wd.claim_values(e, "P355") == ["QNow"]
+    assert wd.label({"id": "Q9", "labels": {"mul": {"value": "Gmail"}}}) == "Gmail"
+
+
+def test_search_prefers_company_hit(monkeypatch):
+    hits = {"search": [{"id": "Q1", "description": "streaming service"},
+                       {"id": "Q2", "description": "American media company"}]}
+    monkeypatch.setattr(wd, "_get", lambda *a, **k: hits)
+    assert wd.search("Netflix", []) == "Q2"
+    monkeypatch.setattr(wd, "_get", lambda *a, **k: {"search": hits["search"][:1]})
+    assert wd.search("Netflix", []) == "Q1"
+
+
+def test_resolve_keeps_product_lines_and_skips_shareholders(monkeypatch):
+    ents = {
+        "QA": _ent("QA", "Apple", P1056=[_claim("QI"), _claim("QP")],
+                   P2397=[_claim("UCa", kind="str")], P127=[_claim("QV")],
+                   P571=[_claim("+1976-00-00T00:00:00Z", kind="str")]),
+        "QI": _ent("QI", "iPhone", "IPhone", P279=[_claim("QP")], P176=[_claim("QA")]),
+        "QP": _ent("QP", "smartphone", "Smartphone", P279=[_claim("QX")]),
+    }
+    monkeypatch.setattr(wd, "search", lambda n, e: "QA")
+    monkeypatch.setattr(wd, "get_entities",
+                        lambda ids, e: {i: ents[i] for i in ids if i in ents})
+    monkeypatch.setattr(wd, "pageviews", lambda t, e, today=None: 1)
+    r = wd.resolve("Apple")
+    assert [c["label"] for c in r["categories"]] == ["iPhone"]
+    assert "QV" not in r["own_entities"]
+    assert r["founded"] == "1976"
+    assert r["via_child"] is None  # has socials -> not a holding company
+
+
 def test_resolve_not_found(monkeypatch):
     monkeypatch.setattr(wd, "search", lambda n, e: None)
     r = wd.resolve("Nope Corp")
