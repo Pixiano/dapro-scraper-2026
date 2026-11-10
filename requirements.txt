@@ -16,3 +16,6 @@ reportlab==5.0.0            # server-side PDF generation
 
 # Instagram / social best-effort (method 2):
 instaloader==4.15.2
+
+# Company mechanism: web search fallback when no BRAVE_API_KEY
+ddgs==9.16.1

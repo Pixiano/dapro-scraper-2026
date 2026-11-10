@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     synthesis_brief_tokens: int = 2000
     synthesis_dossier_tokens: int = 10000
 
+    # --- Company mechanism (no LLM) ---
+    brave_api_key: str = ""   # Brave Search API; empty → ddgs fallback
+    contact_url: str = ""     # Wikimedia requires a contact in the User-Agent
+
     def model_path(self, rel: str) -> Path:
         p = Path(rel)
         return p if p.is_absolute() else self.lmstudio_models_dir / p
