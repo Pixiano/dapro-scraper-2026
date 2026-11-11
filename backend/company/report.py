@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from ..pdf import render_markdown_pdf
-from . import linkcheck
+from . import linkcheck, visual
 
 # Word-boundary AI vocabulary. "AI" is case-sensitive ("ai" in other words is
 # not AI); the entity's own name is removed first so "Mistral AI" / "OpenAI"
@@ -139,7 +139,8 @@ def build(raw: dict, out_dir: Path) -> dict:
     company = raw["company"]
     md = [f"# AI competitor report: {_t(company['label'])}",
           f"Generated {today} · quarters {', '.join(labels)} · "
-          f"competitors: {raw['competitors']['mode']} · no LLM, counts and stated rules only",
+          f"competitors: {raw['competitors']['mode']} · counts and stated rules; the only "
+          "model output is the labelled 'Vision notes' per company",
           "## How to read this",
           "- **AI item**: a headline/post whose title matches the AI keyword list (word "
           "boundary; the entity's own name is removed first, so 'Mistral AI' alone is not AI).",
@@ -154,6 +155,9 @@ def build(raw: dict, out_dir: Path) -> dict:
           f"- **Links** were fetched live at {next(iter(checks.values()), {}).get('checked_at', '-')}: "
           "live, unverified (bot wall, rate limit, timeout or server error) or dead "
           "(404/410/no connection, removed from this report).",
+          "- **Vision notes**: a local vision model reads a screenshot of each homepage "
+          "and lists the AI products visible on it. Model output, **unverified**: check "
+          "against the screenshot; never used in any count, confidence or outlook.",
           "## Summary"]
     for e, m, a in zip(ents, metas, an):
         o = a["outlook"]
@@ -202,6 +206,16 @@ def build(raw: dict, out_dir: Path) -> dict:
             items = [i for i in p[lb] if i["url"] in alive][:TOP]
             md.append(f"### {head}")
             md += [_item_line(i, checks, alive) for i in items] or ["- none found"]
+        v = e.get("vision")
+        if v:  # model output, quarantined in its own labelled block
+            md.append(f"### Vision notes (local model, unverified) on {v.get('url') or '-'}")
+            if v.get("text"):
+                md.append(f"*Read from a homepage screenshot at {v['at']}; "
+                          f"saved as screenshots/{Path(v['screenshot']).name}.*")
+                md += [("- " + _t(ln.strip().lstrip("-•* "))) for ln in v["text"].splitlines()
+                       if visual.keep(ln)][:15]
+            else:
+                md.append(f"- unavailable: {_t(v.get('error') or 'no output')}")
         if e.get("errors"):
             md.append("- *Collection errors*: " + "; ".join(_t(x) for x in e["errors"][:5]))
 

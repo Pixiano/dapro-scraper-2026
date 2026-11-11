@@ -411,3 +411,33 @@ def test_company_web_routes(tmp_path, monkeypatch):
     assert c.get("/api/company/reports/..%2F..%2Fx/2026-11-11/report.pdf").status_code in (400, 404)
     assert c.post("/api/company/runs", json={"name": "  "}).status_code == 400
     assert c.get("/api/company/runs/nope").status_code == 404
+
+
+def test_vision_notes_fail_soft(tmp_path, monkeypatch):
+    from backend.company import visual
+
+    def fake_shot(url, path):
+        if "blocked" in url:
+            return "TimeoutError: page"
+        from PIL import Image
+        img = Image.new("RGB", (40, 40), "white")
+        img.paste((0, 0, 0), (0, 0, 20, 40))  # half black: not blank
+        img.save(path)
+        return None
+    monkeypatch.setattr(visual, "screenshot", fake_shot)
+    monkeypatch.setattr(visual.client, "describe_image",
+                        lambda p, prompt, max_tokens: "- Acme GPT\nPOSITIONING: AI first")
+    ents = [{"label": "Acme", "links": {"website": "https://acme.test"}},
+            {"label": "Blocked", "links": {"website": "https://blocked.test"}},
+            {"label": "NoSite", "links": {}}]
+    a, b, c = visual.notes(ents, tmp_path)
+    assert a["text"].startswith("- Acme GPT") and a["error"] is None
+    assert b["error"].startswith("TimeoutError") and "text" not in b
+    assert c["error"] == "no website"
+
+
+def test_vision_line_filter():
+    from backend.company.visual import keep
+    assert not keep("Accept all cookies") and not keep("- Research") and not keep("Learn more") and not keep("  ")
+    assert keep("- Introducing Claude Opus 5.5") and keep("Try ChatGPT")
+    assert keep("Sovereign AI") and keep("POSITIONING: an AI lab")

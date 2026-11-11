@@ -6,7 +6,7 @@ import time
 from datetime import date
 
 from ..config import BASE_DIR
-from . import collect, competitors, report, wikidata
+from . import collect, competitors, report, visual, wikidata
 
 OUT = BASE_DIR / "data" / "company"
 
@@ -26,12 +26,16 @@ def run(name: str, url: str | None = None, categories: int = 5, per_category: in
 
     out_dir = OUT / slug(company["label"]) / date.today().isoformat()
     out_dir.mkdir(parents=True, exist_ok=True)
+    ents = [data["company"], *data["competitors"]]
+    for e, n in zip(ents, visual.notes(ents, out_dir)):
+        e["vision"] = n  # model output: report labels it unverified, counts ignore it
+    t4 = time.perf_counter()
     raw = {"company": company, "competitors": comps, "collected": data,
            "timing_s": {"resolve": round(t1 - t0, 1), "competitors": round(t2 - t1, 1),
-                        "collect": round(t3 - t2, 1)}}
+                        "collect": round(t3 - t2, 1), "vision": round(t4 - t3, 1)}}
     rep = report.build(raw, out_dir)
     raw["link_checks"] = rep["checks"]
-    raw["timing_s"]["report"] = round(time.perf_counter() - t3, 1)
+    raw["timing_s"]["report"] = round(time.perf_counter() - t4, 1)
     (out_dir / "raw.json").write_text(json.dumps(raw, indent=2, ensure_ascii=False),
                                       encoding="utf-8")
     return {**raw, "out_dir": out_dir, "pdf": rep["pdf"], "link_stats": rep["link_stats"]}

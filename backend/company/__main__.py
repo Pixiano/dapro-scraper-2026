@@ -3,6 +3,7 @@
 import argparse
 import sys
 
+from ..llm import server
 from .pipeline import run
 
 
@@ -20,8 +21,11 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]  # Windows cp1252 pipes
 
     names = [n.strip() for n in (args.competitors or "").split(",") if n.strip()]
-    r = run(args.name, args.url, args.categories, args.per_category, args.top, names,
-            args.social)
+    try:
+        r = run(args.name, args.url, args.categories, args.per_category, args.top, names,
+                args.social)
+    finally:
+        server.stop()  # free the GPU: the vision model is not needed after the run
     data = r["collected"]
     for e in [data["company"], *data["competitors"]]:
         counts = {q["label"]: sum(i["quarter"] == q["label"] for i in e["items"])
