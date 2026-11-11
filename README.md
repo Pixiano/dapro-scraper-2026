@@ -158,7 +158,7 @@ Open `http://localhost:8123`. Paste links. Click the big red button. Go get a co
 .venv\Scripts\python -m pytest -q
 ```
 
-214 tests, fully offline (everything's mocked — no real network calls, no GPU spin-up), runs in under 2 seconds. If the test suite ever takes suspiciously longer than that, something snuck a real network/model call into a unit test again. I've caught myself doing this more than once.
+244 tests, fully offline (everything's mocked — no real network calls, no GPU spin-up), runs in under 2 seconds. If the test suite ever takes suspiciously longer than that, something snuck a real network/model call into a unit test again. I've caught myself doing this more than once.
 
 **Live integration tests.** `tests/test_live_integration.py` holds a handful of tests marked `@pytest.mark.live` that hit the real thing instead of mocks — a real Playwright/Chromium fetch of `example.com`, a real GitHub API call, a real YouTube API call (skipped cleanly if no key is configured). `pytest.ini` excludes them by default (`addopts = -m "not live"`), so they never run in CI and never slow down the offline suite above. Run them explicitly with:
 
@@ -167,6 +167,33 @@ Open `http://localhost:8123`. Paste links. Click the big red button. Go get a co
 ```
 
 They need real network access and (for the website/GitHub collectors) an installed Chromium (`playwright install chromium`) — expect them to take ~15-20 seconds, not milliseconds.
+
+---
+
+## Second mechanism: company AI competitor reports (CLI, no LLM)
+
+A separate pipeline from the creator dossier. Give it a company; it finds the competitors, collects what each did in AI over the last quarters, and writes a PDF with every claim linked. No LLM anywhere: every number is a count, every inference a stated rule. Full plan: [PLAN-COMPANY.md](PLAN-COMPANY.md).
+
+```powershell
+.venv\Scripts\python -m backend.company "Alphabet"
+.venv\Scripts\python -m backend.company "Adaption Labs" --url https://adaptionlabs.ai     # startups / ambiguous names
+.venv\Scripts\python -m backend.company "OpenAI" --competitors "Anthropic,Mistral AI,Meta" # skip the search
+```
+
+| Step | Source | Output |
+|---|---|---|
+| Resolve | Wikidata + Wikipedia pageviews | official links, product/subsidiary categories (Alphabet → Google, YouTube, Maps…) |
+| Competitors | Brave Search API + DuckDuckGo, merged, every name checked on Wikidata | per category; confidence = distinct domains naming it (3+ high, 2 medium) |
+| Collect | Hacker News, Google News (monthly), official blog / Medium feeds, YouTube | items bucketed into last two quarters + this quarter to date |
+| Report | live link check, AI keyword filter | `data/company/<name>/<date>/report.pdf`, `report.md`, `raw.json` |
+
+- **Links** are fetched live: *live*, *unverified* (paywall/bot wall/timeout), or *dead* (404/410/no connection, removed).
+- **Outlook** = this quarter's run-rate vs last quarter (±20% = up/down). A stated rule, not a forecast.
+- **Keys (optional, in `.env`)**: `BRAVE_API_KEY` adds Brave to search; `YOUTUBE_API_KEY` gets full upload history (otherwise RSS, latest 15); `CONTACT_URL` is required by Wikimedia's API rules and is sent only to Wikimedia.
+- **Speed**: ~30 s with `--competitors`, ~75-90 s with search (DuckDuckGo is the slow part).
+- **Limits**: DuckDuckGo throttles repeated runs; Google News links are redirect wrappers; Medium feeds give the latest 10 posts; the AI filter is a keyword list, not a classifier.
+
+Live test (real network, ~20 s): `.venv\Scripts\python -m pytest -m live -k company`
 
 ---
 
