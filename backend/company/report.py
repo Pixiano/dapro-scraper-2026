@@ -1,0 +1,198 @@
+"""Phase 4: AI filter, live link check, rule-based outlook, Markdown -> PDF.
+No LLM: every number is a count, every inference a stated rule."""
+
+import re
+from collections import Counter
+from datetime import date, timedelta
+from pathlib import Path
+
+from ..pdf import render_markdown_pdf
+from . import linkcheck
+
+# Word-boundary AI vocabulary. "AI" is case-sensitive ("ai" in other words is
+# not AI); the entity's own name is removed first so "Mistral AI" / "OpenAI"
+# headlines are not AI just by naming the company.
+# ponytail: keyword list, not a classifier; extend the list when misses show up
+AI = re.compile(
+    r"(?<![\w-])(?:(?i:AI agents?|artificial intelligence|machine learning|deep learning|"
+    r"neural (?:networks?|engine)|large language models?|language models?|"
+    r"foundation models?|reasoning models?|generative|chatbots?|agentic|copilot|chatgpt|"
+    r"gpt-?\d[\w.]*|gemini|claude|llama|grok|inference)|AI|A\.I\.|AGI|GenAI|LLMs?|GPUs?)"
+    r"(?![\w-])")
+SRC = {"hacker_news": "Hacker News", "google_news": "Google News", "blog": "Official blog",
+       "medium": "Medium", "youtube": "YouTube"}
+FIRST_PARTY = {"blog", "medium", "youtube"}
+TOP = 6  # items listed per quarter per entity
+
+
+def ai_terms(title: str, name: str | None) -> list[str]:
+    if name:
+        title = re.sub(rf"(?<![\w]){re.escape(name)}(?![\w])", " ", title, flags=re.I)
+    return [m.lower() for m in AI.findall(title)]
+
+
+def quarter_end(start: date) -> date:
+    m = start.month + 2  # 0-based month index three months on
+    return date(start.year + m // 12, m % 12 + 1, 1)
+
+
+def outlook(last: int, to_date: int, q_start: date, today: date) -> dict:
+    """Straight-line run-rate of the current quarter vs the last full one.
+    A stated rule, not a forecast."""
+    total = (quarter_end(q_start) - q_start).days
+    elapsed = min((today - q_start).days + 1, total)
+    proj = round(to_date * total / elapsed)
+    frac = elapsed / total
+    conf = ("high" if frac >= .5 and to_date >= 20 else
+            "medium" if frac >= .25 and to_date >= 5 else "low")
+    trend = ("new" if proj else "none") if last == 0 else \
+        "up" if proj > last * 1.2 else "down" if proj < last * .8 else "flat"
+    return {"projection": proj, "trend": trend, "confidence": conf,
+            "elapsed_days": elapsed, "quarter_days": total}
+
+
+def analyse(e: dict, labels: list[str], cur_start: date, today: date) -> dict:
+    ai = []
+    for it in e["items"]:
+        terms = ai_terms(it["title"], e.get("searched_as"))
+        if terms:
+            ai.append({**it, "terms": terms,
+                       "confidence": "high" if it["source"] in FIRST_PARTY else "medium"})
+    counts = {lb: sum(i["quarter"] == lb for i in ai) for lb in labels}
+    return {"ai": ai, "counts": counts, "total": {lb: sum(i["quarter"] == lb for i in e["items"])
+                                                  for lb in labels},
+            "by_source": {s: [sum(i["quarter"] == lb and i["source"] == s for i in ai)
+                              for lb in labels] for s in SRC},
+            "themes": Counter(t for i in ai for t in set(i["terms"])).most_common(6),
+            "outlook": outlook(counts[labels[1]], counts[labels[2]], cur_start, today)}
+
+
+def top(ai: list[dict], label: str, n: int) -> list[dict]:
+    """Round-robin across sources (HN by points, the rest newest first) so one
+    loud source cannot fill the list."""
+    xs = sorted((i for i in ai if i["quarter"] == label),
+                key=lambda i: i["published"] or "", reverse=True)
+    xs.sort(key=lambda i: -(i.get("points") or 0))
+    groups = [[i for i in xs if i["source"] == s] for s in SRC]
+    out: list[dict] = []
+    while len(out) < n and any(groups):
+        for g in groups:
+            if g and len(out) < n:
+                out.append(g.pop(0))
+    return out
+
+
+def _t(s: str) -> str:
+    return re.sub(r"[\[\]*`]", "", s or "").strip()  # keep the PDF markup intact
+
+
+def _st(url: str, checks: dict) -> str:
+    c = checks.get(url) or {}
+    code = f" {c['code']}" if c.get("code") and c.get("status") != "live" else ""
+    return f"{c.get('status', 'unchecked')}{code}"
+
+
+def _item_line(i: dict, checks: dict) -> str:
+    pts = f" · {i['points']} points" if i.get("points") else ""
+    art = f" · [article]({i['link']}) ({_st(i['link'], checks)})" if i.get("link") else ""
+    return (f"- {i['published']} · {SRC[i['source']]}{pts} · [{_t(i['title'])}]({i['url']})"
+            f" ({_st(i['url'], checks)}){art} · confidence: {i['confidence']}")
+
+
+def build(raw: dict, out_dir: Path) -> dict:
+    col = raw["collected"]
+    quarters = col["quarters"]
+    labels = [q["label"] for q in quarters]
+    cur_start = date.fromisoformat(quarters[-1]["start"])
+    today = date.fromisoformat(quarters[-1]["end"]) - timedelta(days=1)
+    ents = [col["company"], *col["competitors"]]
+    metas = [raw["company"], *raw["competitors"]["overall"]]  # same order as collected
+    an = [analyse(e, labels, cur_start, today) for e in ents]
+    picks = [{lb: top(a["ai"], lb, 2 * TOP) for lb in labels[1:]} for a in an]
+
+    urls: list[str] = []
+    for e, m, p in zip(ents, metas, picks):
+        urls += [v for v in (e.get("links") or {}).values() if v]
+        urls += [x["url"] for x in (m.get("evidence") or [])[:3]]
+        urls += [i[k] for its in p.values() for i in its for k in ("url", "link") if i.get(k)]
+    checks = linkcheck.check_all(urls)
+    alive = {u for u, c in checks.items() if c["status"] != "dead"}
+
+    last, cur = labels[1], labels[2]
+    nxt = cur.replace(" (to date)", "")
+    company = raw["company"]
+    md = [f"# AI competitor report: {_t(company['label'])}",
+          f"Generated {today} · quarters {', '.join(labels)} · "
+          f"competitors: {raw['competitors']['mode']} · no LLM, counts and stated rules only",
+          "## How to read this",
+          "- **AI item**: a headline/post whose title matches the AI keyword list (word "
+          "boundary; the entity's own name is removed first, so 'Mistral AI' alone is not AI).",
+          "- **Item confidence**: high = first-party (own blog, Medium, YouTube); "
+          "medium = third party naming the entity in the title (Hacker News, Google News).",
+          "- **Competitor confidence**: distinct web domains naming it as a competitor "
+          "(3+ high, 2 medium); names not on Wikidata drop one level.",
+          f"- **Outlook for {nxt}**: straight-line run-rate of the quarter so far vs "
+          f"{last} (more than 20% change = up/down). A stated rule, **not a forecast**.",
+          f"- **Links** were fetched live at {next(iter(checks.values()), {}).get('checked_at', '-')}: "
+          "live, unverified (bot wall, rate limit, timeout or server error) or dead "
+          "(404/410/no connection, removed from this report).",
+          "## Summary"]
+    for e, m, a in zip(ents, metas, an):
+        o = a["outlook"]
+        role = "the company" if m is company else f"{m.get('confidence', '?')} confidence"
+        md.append(f"- **{_t(e['label'])}** ({role}): AI items "
+                  + " · ".join(f"{lb} {a['counts'][lb]}" for lb in labels)
+                  + f" → {nxt} run-rate ~{o['projection']} ({o['trend']} vs {last}, "
+                  f"{o['confidence']} confidence)")
+
+    for n, (e, m, a, p) in enumerate(zip(ents, metas, an, picks)):
+        o = a["outlook"]
+        md.append(f"## {_t(e['label'])} (the company)" if n == 0 else
+                  f"## Competitor {n}: {_t(e['label'])}")
+        if n:
+            why = ", ".join(m.get("categories") or []) or "named by you (--competitors)"
+            md.append(f"- **Competes in**: {_t(why)} · confidence: {m.get('confidence')} · "
+                      f"{len(m.get('domains') or [])} domains")
+            for x in [x for x in (m.get("evidence") or []) if x["url"] in alive][:3]:
+                md.append(f"- Evidence: [{_t(x['title'])}]({x['url']}) "
+                          f"({_st(x['url'], checks)}, via {x['engine']})")
+        prof = [f"[Wikidata]({m['wikidata_url']})"] if m.get("wikidata_url") else []
+        prof += [f"[{k}]({v}) ({_st(v, checks)})" for k, v in (e.get("links") or {}).items()
+                 if v and v in alive]
+        md.append(f"- **Profile**: {' · '.join(prof) or 'no official links found'} · "
+                  f"searched as '{_t(e.get('searched_as') or '')}'")
+        md.append("- **AI items / all items collected**: " + " · ".join(
+            f"{lb} {a['counts'][lb]}/{a['total'][lb]}" for lb in labels))
+        md.append("- **AI items by source** (" + " / ".join(labels) + "): " + " · ".join(
+            f"{SRC[s]} {'/'.join(map(str, v))}" for s, v in a["by_source"].items() if any(v)))
+        if a["themes"]:
+            md.append("- **Recurring AI terms** (inference: what its AI news is about): "
+                      + ", ".join(f"{t} ({c})" for t, c in a["themes"]))
+        md.append(f"- **Outlook {nxt}** (rule, not a forecast): {a['counts'][cur]} AI items in "
+                  f"{o['elapsed_days']} of {o['quarter_days']} days → run-rate "
+                  f"~{o['projection']} vs {a['counts'][last]} in {last} → **{o['trend']}** "
+                  f"(confidence {o['confidence']}: share of quarter elapsed and item count)")
+        for lb, head in ((last, f"Last quarter ({last}): top AI items"),
+                         (cur, f"This quarter so far ({cur}): top AI items")):
+            items = [i for i in p[lb] if i["url"] in alive][:TOP]
+            md.append(f"### {head}")
+            md += [_item_line(i, checks) for i in items] or ["- none found"]
+        if e.get("errors"):
+            md.append("- *Collection errors*: " + "; ".join(_t(x) for x in e["errors"][:5]))
+
+    low = [x for c in raw["competitors"].get("per_category") or [] for x in c["appendix"]]
+    if low:
+        md.append("## Appendix: low-confidence names (one domain only)")
+        md += [f"- {_t(x['label'])}: [{_t(x['evidence'][0]['title'])}]({x['evidence'][0]['url']})"
+               for x in low if x.get("evidence")]
+    stats = Counter(c["status"] for c in checks.values())
+    md.append("## Link check")
+    md.append(f"- {len(checks)} links fetched: " + ", ".join(f"{k} {v}" for k, v in stats.items())
+              + ". Google News links are Google redirect pages, so live means the redirect "
+              "resolved, not that the publisher page did.")
+
+    text = "\n".join(md)
+    (out_dir / "report.md").write_text(text, encoding="utf-8")
+    pdf = render_markdown_pdf(text, out_dir / "report.pdf",
+                              f"AI competitor report: {company['label']}")
+    return {"pdf": pdf, "checks": checks, "link_stats": dict(stats)}

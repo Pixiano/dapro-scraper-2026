@@ -287,3 +287,78 @@ def test_months_split():
     assert [(a.isoformat(), b.isoformat()) for a, b in m] == [
         ("2026-04-01", "2026-05-01"), ("2026-05-01", "2026-06-01"), ("2026-06-01", "2026-06-15")]
     assert len(co.months(date(2025, 12, 1), date(2026, 2, 1))) == 2  # year edge
+
+
+# ---- phase 4: report ----
+
+def test_ai_terms_strips_entity_name():
+    from backend.company.report import ai_terms
+    assert ai_terms("Mistral AI raises funding", "Mistral AI") == []
+    assert ai_terms("OpenAI ships new office", "OpenAI") == []
+    assert ai_terms("Mistral AI launches reasoning model and AI agents", "Mistral AI") == \
+        ["reasoning model", "ai agents"]
+    assert ai_terms("Meta trains Llama on GPUs", "Meta") == ["llama", "gpus"]
+    assert ai_terms("Said to be detailed", None) == []  # "ai" inside words is not AI
+
+
+def test_outlook_run_rate():
+    from backend.company.report import outlook, quarter_end
+    assert quarter_end(date(2026, 10, 1)) == date(2027, 1, 1)
+    o = outlook(last=40, to_date=23, q_start=date(2026, 10, 1), today=date(2026, 11, 15))
+    assert o["elapsed_days"] == 46 and o["quarter_days"] == 92
+    assert o["projection"] == 46 and o["trend"] == "flat"
+    assert outlook(10, 20, date(2026, 10, 1), date(2026, 11, 15))["trend"] == "up"
+    assert outlook(0, 0, date(2026, 10, 1), date(2026, 10, 2))["trend"] == "none"
+
+
+def test_top_round_robin():
+    from backend.company.report import top
+    ai = [{"source": "google_news", "quarter": "Q", "published": f"2026-08-{d:02d}",
+           "url": str(d)} for d in range(1, 10)]
+    ai += [{"source": "hacker_news", "quarter": "Q", "published": "2026-08-01",
+            "url": "h1", "points": 50}, {"source": "hacker_news", "quarter": "Q",
+                                         "published": "2026-08-02", "url": "h2", "points": 900}]
+    assert [i["url"] for i in top(ai, "Q", 4)] == ["h2", "09", "h1", "08"] or \
+        [i["url"] for i in top(ai, "Q", 4)] == ["h2", "9", "h1", "8"]
+
+
+def test_linkcheck_status_rules():
+    import httpx
+    from backend.company.linkcheck import check
+
+    def handler(req):
+        if req.url.host == "down.test":
+            raise httpx.ConnectError("dns")
+        if req.url.host == "hacker-news.firebaseio.com":
+            return httpx.Response(200, text="null" if "/1.json" in req.url.path else "{}")
+        return httpx.Response({"gone": 404, "wall": 403, "ok": 200, "err": 503}[req.url.host])
+    c = httpx.Client(transport=httpx.MockTransport(handler))
+    st = {h: check(f"https://{h}/", c)["status"] for h in ("gone", "wall", "ok", "err", "down.test")}
+    assert st == {"gone": "dead", "wall": "unverified", "ok": "live", "err": "unverified",
+                  "down.test": "dead"}
+    hn = "https://news.ycombinator.com/item?id="
+    assert check(hn + "1", c)["status"] == "dead" and check(hn + "2", c)["status"] == "live"
+
+
+def test_build_report_pdf(tmp_path, monkeypatch):
+    from backend.company import linkcheck, report
+    monkeypatch.setattr(linkcheck, "check_all",
+                        lambda urls: {u: {"status": "dead" if "dead" in u else "live",
+                                          "code": 200, "checked_at": "t"} for u in urls})
+    q = [{"label": "Q2 2026", "start": "2026-04-01", "end": "2026-07-01"},
+         {"label": "Q3 2026", "start": "2026-07-01", "end": "2026-10-01"},
+         {"label": "Q4 2026 (to date)", "start": "2026-10-01", "end": "2026-11-12"}]
+    it = lambda t, u, qq: {"source": "hacker_news", "title": t, "url": u,  # noqa: E731
+                           "published": "2026-08-01", "quarter": qq, "points": 30}
+    ent = lambda n, items: {"label": n, "searched_as": n, "links": {}, "items": items,  # noqa
+                            "errors": []}
+    raw = {"company": {"label": "Acme", "wikidata_url": None},
+           "competitors": {"mode": "user", "overall": [{"label": "Rival", "evidence": []}]},
+           "collected": {"quarters": q, "company": ent("Acme", [it("Acme AI chip", "u1", "Q3 2026")]),
+                         "competitors": [ent("Rival", [it("Rival LLM [beta]", "u2", "Q3 2026"),
+                                                       it("Rival AI", "dead3", "Q3 2026"),
+                                                       it("Rival lunch", "u4", "Q3 2026")])]}}
+    out = report.build(raw, tmp_path)
+    md = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert out["pdf"].exists() and "[Rival LLM beta](u2)" in md and "dead3" not in md
+    assert "Q3 2026 2/3" in md  # counts keep dead-linked items; only the listing drops them

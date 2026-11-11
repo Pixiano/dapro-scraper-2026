@@ -8,7 +8,7 @@ import time
 from datetime import date
 
 from ..config import BASE_DIR
-from . import collect, competitors, wikidata
+from . import collect, competitors, report, wikidata
 
 
 def main() -> None:
@@ -39,13 +39,17 @@ def main() -> None:
     raw = {"company": company, "competitors": comps, "collected": data,
            "timing_s": {"resolve": round(t1 - t0, 1), "competitors": round(t2 - t1, 1),
                         "collect": round(t3 - t2, 1)}}
+    rep = report.build(raw, out_dir)
+    raw["link_checks"] = rep["checks"]
+    raw["timing_s"]["report"] = round(time.perf_counter() - t3, 1)
     (out_dir / "raw.json").write_text(json.dumps(raw, indent=2, ensure_ascii=False),
                                       encoding="utf-8")
     for e in [data["company"], *data["competitors"]]:
         counts = {q["label"]: sum(i["quarter"] == q["label"] for i in e["items"])
                   for q in data["quarters"]}
         print(f"{e['label']:28.28s} {counts}  errors={len(e['errors'])}")
-    print(f"timing {raw['timing_s']}\nraw: {out_dir / 'raw.json'}")
+    print(f"links {rep['link_stats']}\ntiming {raw['timing_s']}\n"
+          f"raw: {out_dir / 'raw.json'}\npdf: {rep['pdf']}")
 
 
 def slug(s: str) -> str:

@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 from .. import quota
 from ..collectors import news, youtube
 from ..config import settings
-from . import UA
+from . import UA_PLAIN
 from . import wikidata as wd
 
 HN = "https://hn.algolia.com/api/v1/search_by_date"
@@ -94,7 +94,7 @@ def _item(source: str, title: str, url: str, d: date | None,
 
 
 def _http(url: str, **params) -> httpx.Response:
-    return httpx.get(url, params=params or None, headers={"User-Agent": UA},
+    return httpx.get(url, params=params or None, headers={"User-Agent": UA_PLAIN},
                      timeout=20, follow_redirects=True)
 
 
