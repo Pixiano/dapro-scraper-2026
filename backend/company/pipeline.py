@@ -12,7 +12,8 @@ OUT = BASE_DIR / "data" / "company"
 
 
 def run(name: str, url: str | None = None, categories: int = 5, per_category: int = 3,
-        top: int = 10, names: list[str] | None = None, social: bool = False) -> dict:
+        top: int = 10, names: list[str] | None = None, social: bool = False,
+        vision: bool = True) -> dict:
     t0 = time.perf_counter()
     company = wikidata.resolve(name, top=categories, url=url)
     if not company["links"]["website"]:
@@ -27,7 +28,7 @@ def run(name: str, url: str | None = None, categories: int = 5, per_category: in
     out_dir = OUT / slug(company["label"]) / date.today().isoformat()
     out_dir.mkdir(parents=True, exist_ok=True)
     ents = [data["company"], *data["competitors"]]
-    for e, n in zip(ents, visual.notes(ents, out_dir)):
+    for e, n in zip(ents, visual.notes(ents, out_dir) if vision else [None] * len(ents)):
         e["vision"] = n  # model output: report labels it unverified, counts ignore it
     t4 = time.perf_counter()
     raw = {"company": company, "competitors": comps, "collected": data,

@@ -15,6 +15,8 @@ def main() -> None:
     ap.add_argument("--per-category", type=int, default=3, help="competitors per category")
     ap.add_argument("--top", type=int, default=10, help="competitors overall")
     ap.add_argument("--competitors", help='skip search: "OpenAI,Anthropic"')
+    ap.add_argument("--no-vision", action="store_true",
+                    help="skip the homepage screenshots + local vision model notes")
     ap.add_argument("--social", action="store_true",
                     help="add Instagram/Facebook profile summaries (public page, no login)")
     args = ap.parse_args()
@@ -23,7 +25,7 @@ def main() -> None:
     names = [n.strip() for n in (args.competitors or "").split(",") if n.strip()]
     try:
         r = run(args.name, args.url, args.categories, args.per_category, args.top, names,
-                args.social)
+                args.social, vision=not args.no_vision)
     finally:
         server.stop()  # free the GPU: the vision model is not needed after the run
     data = r["collected"]

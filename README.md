@@ -190,7 +190,7 @@ Or in the browser: start the server (see Setup) and open `http://localhost:8123/
 | Collect | Hacker News, Google News (monthly), official blog / Medium feeds, YouTube | items bucketed into last two quarters + this quarter to date |
 | Report | live link check, AI keyword filter | `data/company/<name>/<date>/report.pdf`, `report.md`, `raw.json` |
 
-- **Vision notes** (always on): each homepage is screenshotted and the local vision model (Qwen3.5-4B, same llama.cpp server as the creator dossiers) lists the AI products visible on it. It is the only model output in the report, shown in its own section labelled *unverified*, and never feeds a count, confidence or outlook. No GPU or model file? The section says so and the rest of the report is unaffected.
+- **Vision notes** (on by default, `--no-vision` or the page checkbox turns them off): each homepage is screenshotted and the local vision model (Qwen3.5-4B, same llama.cpp server as the creator dossiers) lists the AI products visible on it. It is the only model output in the report, shown in its own section labelled *unverified*, and never feeds a count, confidence or outlook. No GPU or model file? The section says so and the rest of the report is unaffected.
 - **`--social`** (off by default) reads the follower/post numbers that Instagram and Facebook show on the public profile page. One request per profile, no login, no posts; shown per entity, never in the quarter counts.
 - **Links** are fetched live: *live*, *unverified* (paywall/bot wall/timeout), or *dead* (404/410/no connection, removed).
 - **Outlook** = this quarter's run-rate vs last quarter (±20% = up/down). A stated rule, not a forecast.
