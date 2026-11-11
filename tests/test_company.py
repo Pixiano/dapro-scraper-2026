@@ -105,3 +105,60 @@ def test_resolve_not_found(monkeypatch):
     monkeypatch.setattr(wd, "search", lambda n, e: None)
     r = wd.resolve("Nope Corp")
     assert r["qid"] is None and r["errors"]
+
+
+# ---- Phase 2: competitors ----
+
+from backend.company import competitors as cp  # noqa: E402
+
+
+def test_names_from_title():
+    f = cp.names_from_title
+    assert f("Apple Maps vs. Google Maps: I used both navigation apps") == ["Apple Maps", "Google Maps"]
+    assert f("Google Maps vs Waze vs Apple Maps — which is best in 2026?") == ["Google Maps", "Waze", "Apple Maps"]
+    assert f("Why I switched from Google Maps vs OpenStreetMap") == ["Google Maps", "OpenStreetMap"]
+    assert f("AWS vs Azure 2026 | Comparison") == ["AWS", "Azure"]
+    assert f("I tested 6 Google Maps alternatives") == []
+
+
+def test_confidence_buckets():
+    assert [cp.confidence(n) for n in (5, 3, 2, 1)] == ["high", "high", "medium", "low"]
+
+
+def test_web_search_merges_dedupes_and_drops_ads(monkeypatch):
+    monkeypatch.setattr(cp, "_brave", lambda q, e: [
+        {"title": "A vs B", "url": "https://x.com/1", "engine": "brave"},
+        {"title": "ad", "url": "https://www.bing.com/aclick?x", "engine": "brave"}])
+    monkeypatch.setattr(cp, "_ddg", lambda q, e: [
+        {"title": "A vs B", "url": "https://x.com/1", "engine": "ddgs"},
+        {"title": "A vs C", "url": "https://y.org/2", "engine": "ddgs"}])
+    assert [r["url"] for r in cp.web_search("q", [])] == ["https://x.com/1", "https://y.org/2"]
+
+
+def test_for_category_filters_self_owned_and_ranks(monkeypatch):
+    titles = [("Google Maps vs Apple Maps", "a.com"), ("Apple Maps vs Google Maps", "b.com"),
+              ("Google Maps vs Apple Maps vs Waze", "c.com"), ("Google Maps vs Waze", "d.com"),
+              ("Google Maps vs Here WeGo", "e.com"), ("Google Maps vs Google Earth", "f.com")]
+    monkeypatch.setattr(cp, "web_search", lambda q, e: [
+        {"title": t, "url": f"https://{d}/x", "engine": "ddgs"} for t, d in titles])
+    qids = {"Apple Maps": "QAM", "Waze": "QWZ", "Here WeGo": "QH", "Google Earth": "QGE"}
+    ents = {"QAM": _ent("QAM", "Apple Maps", "Apple Maps"),
+            "QWZ": _ent("QWZ", "Waze", "Waze", P749=[_claim("QG")]),
+            "QH": _ent("QH", "Here WeGo", "Here WeGo"),
+            "QGE": _ent("QGE", "Google Earth", "Google Earth")}
+    monkeypatch.setattr(wd, "search", lambda n, e, prefer_company=True: qids.get(n))
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {i: ents[i] for i in ids if i in ents})
+    cat = {"qid": "QM", "label": "Google Maps", "enwiki": "Google Maps"}
+    r = cp.for_category(cat, {"QG"}, ["google"], 3, [])
+    assert [(c["label"], c["confidence"]) for c in r["competitors"]] == [("Apple Maps", "high")]
+    assert [c["label"] for c in r["appendix"]] == ["Here WeGo"]  # 1 domain -> low
+    # Waze (parent Google) and Google Earth (own name) never appear
+
+
+def test_overall_dedupes_across_categories():
+    m = lambda q, d: {"qid": q, "label": q, "domains": d, "competitors": []}  # noqa: E731
+    per = [{"category": "Cloud", "competitors": [m("MS", ["a", "b"]), m("AWS", ["a", "b", "c"])]},
+           {"category": "Search", "competitors": [m("MS", ["c", "d"])]}]
+    r = cp.overall(per, 10)
+    assert [(x["qid"], x["categories"], x["confidence"]) for x in r] == [
+        ("MS", ["Cloud", "Search"], "high"), ("AWS", ["Cloud"], "high")]

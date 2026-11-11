@@ -4,7 +4,9 @@ its product/subsidiary categories. Live APIs only, no LLM.
 Fail soft: network/API errors are appended to `errors` and the caller gets
 whatever was resolved, never an exception."""
 
+import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from urllib.parse import quote
 
@@ -30,7 +32,17 @@ SOCIAL = {"P2397", "P2003", "P2013"}
 MAX_CANDIDATES = 60
 
 
+_cache: dict[str, dict] = {}  # per process = per CLI run
+
+
 def _get(url: str, errors: list[str], **params) -> dict:
+    key = url + json.dumps(params, sort_keys=True)
+    if key not in _cache:
+        _cache[key] = _fetch(url, errors, params)
+    return _cache[key]
+
+
+def _fetch(url: str, errors: list[str], params: dict) -> dict:
     try:
         r = httpx.get(url, params=params or None, headers={"User-Agent": UA},
                       timeout=20, follow_redirects=True)
@@ -47,13 +59,13 @@ COMPANY = re.compile(r"\b(company|corporation|conglomerate|organi[sz]ation|enter
                      r"firm|manufacturer|developer|publisher|studio|brand|startup)\b", re.I)
 
 
-def search(name: str, errors: list[str]) -> str | None:
-    """Top hit, preferring one described as a company ("Netflix" the service
-    ranks above Netflix the media company)."""
+def search(name: str, errors: list[str], prefer_company: bool = True) -> str | None:
+    """Top hit; by default prefer one described as a company ("Netflix" the
+    service ranks above Netflix the media company)."""
     data = _get(API, errors, action="wbsearchentities", search=name,
                 language="en", type="item", limit=5, format="json")
     hits = data.get("search") or []
-    for h in hits:
+    for h in hits if prefer_company else []:
         if COMPANY.search(h.get("description") or ""):
             return h["id"]
     return hits[0]["id"] if hits else None
@@ -120,6 +132,28 @@ def pageviews(title: str, errors: list[str], today: date | None = None) -> int:
     return sum(i.get("views", 0) for i in data.get("items") or [])
 
 
+def is_generic(ent: dict) -> bool:
+    """ponytail: P279 (subclass-of) without a manufacturer/developer (P176/P178)
+    marks generic classes like "smartphone"; product lines (iPhone, Windows)
+    carry P279 too but name their maker. Heuristic."""
+    return bool(claim_values(ent, "P279")) and not (claim_values(ent, "P176")
+                                                    or claim_values(ent, "P178"))
+
+
+def base_name(s: str) -> str:
+    """"Netflix, Inc." -> "Netflix"."""
+    return re.sub(r",?\s+(inc\.?|corp\.?|corporation|ltd\.?|llc|plc|co\.|ag|se|s\.a\.)$",
+                  "", s.strip(), flags=re.I)
+
+
+def _views(ents: dict[str, dict], errors: list[str], today: date | None) -> dict[str, int]:
+    # ponytail: 8 threads; Wikimedia allows far more, raise if runs stay slow
+    with ThreadPoolExecutor(8) as ex:
+        vals = ex.map(lambda e: pageviews(enwiki(e) or "", errors, today) if enwiki(e) else 0,
+                      ents.values())
+        return dict(zip(ents.keys(), vals))
+
+
 def _candidates(ents: list[dict]) -> list[str]:
     seen: list[str] = []
     for e in ents:
@@ -142,13 +176,19 @@ def resolve(name: str, top: int = 5, today: date | None = None) -> dict:
 
     # Candidate categories (products + subsidiaries), with labels/sitelinks/claims.
     cand_ents = get_entities(_candidates([ent]), errors)
-    views = {q: pageviews(enwiki(e) or "", errors, today) if enwiki(e) else 0
-             for q, e in cand_ents.items()}
+    views = _views(cand_ents, errors, today)
 
     # Holding companies (Alphabet) carry no socials/products: descend into the
     # most-viewed subsidiary (Google) and merge its links + products.
     child = None
     ent_links = links(ent)
+    # Netflix, Inc. keeps its socials on the same-named service item: borrow them.
+    if not any(ent_links[LINKS[p][0]] for p in SOCIAL):
+        same = [e for e in cand_ents.values()
+                if base_name(label(e)).lower() == base_name(label(ent)).lower()]
+        for e in same[:1]:
+            for k, v in links(e).items():
+                ent_links[k] = ent_links[k] or v
     # Socials only: Tesla has no P1056 but is no holding company (was -> SolarCity).
     if not any(ent_links[LINKS[p][0]] for p in SOCIAL):
         subs = [q for q in claim_values(ent, "P355") if q in cand_ents]
@@ -159,17 +199,11 @@ def resolve(name: str, top: int = 5, today: date | None = None) -> dict:
             new = [q for q in _candidates([child]) if q not in cand_ents]
             more = get_entities(new, errors)
             cand_ents.update(more)
-            views.update({q: pageviews(enwiki(e) or "", errors, today) if enwiki(e) else 0
-                          for q, e in more.items()})
+            views.update(_views(more, errors, today))
 
     cats: list[dict] = []
     for q, e in cand_ents.items():
-        # ponytail: P279 (subclass-of) without a manufacturer/developer (P176/P178)
-        # marks generic classes like "smartphone"; product lines (iPhone, Windows)
-        # carry P279 too but name their maker. Heuristic.
-        generic = claim_values(e, "P279") and not (claim_values(e, "P176")
-                                                   or claim_values(e, "P178"))
-        if child and q == child["id"] or not enwiki(e) or generic:
+        if child and q == child["id"] or not enwiki(e) or is_generic(e):
             continue
         cats.append({"qid": q, "label": label(e), "enwiki": enwiki(e),
                      "pageviews": views.get(q, 0)})
@@ -180,9 +214,10 @@ def resolve(name: str, top: int = 5, today: date | None = None) -> dict:
     founded = claim_values(ent, "P571")
     # P127 (owned by) is skipped: for public companies it lists shareholders
     # (Vanguard, BlackRock), which must not be filtered out as "self".
-    own = {qid, *claim_values(ent, "P355"), *claim_values(ent, "P749")}
+    # Own = self, parent, and every product/subsidiary seen (Waze, Gmail...).
+    own = {qid, *claim_values(ent, "P749"), *cand_ents}
     if child:
-        own |= {child["id"], *claim_values(child, "P355")}
+        own.add(child["id"])
 
     out.update({
         "qid": qid,
@@ -195,7 +230,8 @@ def resolve(name: str, top: int = 5, today: date | None = None) -> dict:
         "industries": [label(refs[q]) for q in claim_values(ent, "P452")[:3] if q in refs],
         "links": ent_links,
         "via_child": {"qid": child["id"], "label": label(child)} if child else None,
-        "own_entities": sorted(own),  # used by Phase 2 to drop self-owned "competitors"
+        "own_entities": sorted(own),  # Phase 2 drops these as "competitors"
+        "own_names": [base_name(label(x)) for x in (ent, child) if x],
         "categories": cats[:top],
     })
     return out
