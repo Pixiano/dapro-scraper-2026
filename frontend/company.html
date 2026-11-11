@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Company AI Reports</title>
+<link rel="stylesheet" href="/style.css?v=7">
+</head>
+<body>
+<header>
+  <h1>Company <span>AI</span> competitor reports</h1>
+  <p class="sub">Enter a company. It finds competitors with live web search, collects their AI news,
+    blog posts and videos for the last quarters, checks every link, and writes a PDF.
+    No LLM: counts and stated rules only. <a href="/">Creator dossiers →</a></p>
+</header>
+
+<form class="card" id="f">
+  <label class="lbl" for="name">Company name</label>
+  <input type="text" id="name" required placeholder="Alphabet">
+  <label class="lbl" for="url">Official website <span class="opt">(optional: pins startups and ambiguous names)</span></label>
+  <input type="text" id="url" placeholder="https://adaptionlabs.ai">
+  <label class="lbl" for="comps">Competitors <span class="opt">(optional, comma separated: skips the search)</span></label>
+  <input type="text" id="comps" placeholder="Anthropic, Mistral AI, Meta">
+  <label class="row hint"><input type="checkbox" id="social"> Add Instagram / Facebook profile numbers (public page, no login)</label>
+  <div class="row submit-row">
+    <button id="go">Build report</button>
+    <span class="hint" id="state" role="status" aria-live="polite"></span>
+  </div>
+</form>
+
+<section class="card">
+  <h2>Reports</h2>
+  <div id="list" class="hint">Loading…</div>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+
+async function loadList() {
+  const rows = await (await fetch("/api/company/reports")).json();
+  $("list").innerHTML = rows.length ? rows.map((r) =>
+    `<div class="row between"><span><b>${esc(r.company)}</b> · ${esc(r.date)}</span>
+     <span><a href="/api/company/reports/${r.report}/report.pdf" target="_blank">PDF</a> ·
+     <a href="/api/company/reports/${r.report}/report.md" target="_blank">Markdown</a></span></div>`).join("")
+    : "No reports yet.";
+}
+
+$("f").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  $("go").disabled = true;
+  const t0 = Date.now();
+  const res = await fetch("/api/company/runs", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({name: $("name").value, url: $("url").value || null,
+                          competitors: $("comps").value || null, social: $("social").checked})});
+  let run = await res.json();
+  while (run.status === "queued" || run.status === "running") {
+    $("state").textContent = `${run.status}… ${Math.round((Date.now() - t0) / 1000)} s (search takes about 1–2 minutes)`;
+    await new Promise((r) => setTimeout(r, 2000));
+    run = await (await fetch(`/api/company/runs/${run.id}`)).json();
+  }
+  $("go").disabled = false;
+  if (run.status === "done") {
+    $("state").innerHTML = `Done in ${Math.round((Date.now() - t0) / 1000)} s · ${run.competitors.length} competitors ·
+      <a href="/api/company/reports/${run.report}/report.pdf" target="_blank">open PDF</a>`;
+    loadList();
+  } else {
+    $("state").textContent = `Failed: ${run.error || "unknown error"}`;
+  }
+});
+loadList();
+</script>
+</body>
+</html>

@@ -22,6 +22,7 @@ from .. import quota
 from ..collectors import news, youtube
 from ..config import settings
 from . import UA_PLAIN
+from . import social as social_mod
 from . import wikidata as wd
 
 HN = "https://hn.algolia.com/api/v1/search_by_date"
@@ -245,7 +246,7 @@ def _yt_api(cid: str, bounds) -> list[dict]:
 
 # ---- per entity ----
 
-def entity(e: dict, bounds) -> dict:
+def entity(e: dict, bounds, social: bool = False) -> dict:
     """e: {label, links, ...} (company or competitor) -> e + collected items."""
     errors: list[str] = []
     # search with the name it was found/typed as: "Meta", not "Meta Platforms"
@@ -260,12 +261,13 @@ def entity(e: dict, bounds) -> dict:
             seen.add(it["url"])
             uniq.append(it)
     return {"label": e["label"], "searched_as": name, "qid": e.get("qid"), "links": links,
-            "blog_feed": feed,
+            "blog_feed": feed, "social": social_mod.profiles(links) if social else None,
             "items": sorted(uniq, key=lambda i: i["published"] or "", reverse=True),
             "errors": errors}
 
 
-def collect(company: dict, competitors: list[dict], today: date | None = None) -> dict:
+def collect(company: dict, competitors: list[dict], today: date | None = None,
+            social: bool = False) -> dict:
     bounds = quarter_bounds(today or date.today())
     targets = [{"label": company.get("label") or company["query"],
                 "name": wd.base_name(company.get("label") or company["query"]),
@@ -273,7 +275,7 @@ def collect(company: dict, competitors: list[dict], today: date | None = None) -
                 "links": company.get("links") or {}}] + competitors
     # ponytail: 4 threads; sources are different hosts. Raise if runs stay slow.
     with ThreadPoolExecutor(4) as ex:
-        results = list(ex.map(lambda t: entity(t, bounds), targets))
+        results = list(ex.map(lambda t: entity(t, bounds, social), targets))
     return {"quarters": [{"label": lbl, "start": s.isoformat(), "end": e.isoformat()}
                          for lbl, s, e in bounds],
             "company": results[0], "competitors": results[1:]}

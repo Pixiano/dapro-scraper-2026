@@ -183,6 +183,13 @@ def build(raw: dict, out_dir: Path) -> dict:
             f"{lb} {a['counts'][lb]}/{a['total'][lb]}" for lb in labels))
         md.append("- **AI items by source** (" + " / ".join(labels) + "): " + " · ".join(
             f"{SRC[s]} {'/'.join(map(str, v))}" for s, v in a["by_source"].items() if any(v)))
+        if e.get("social"):  # --social: profile-level, never in the counts above
+            md.append("- **Social profiles** (public page summary, not in counts): " + " · ".join(
+                f"[{k}]({s['url']}): " + (", ".join(f"{v} {f.replace('_', ' ')}"
+                                                    for f, v in s.items()
+                                                    if f not in ("url", "available"))
+                                          if s["available"] else f"unavailable ({s['reason']})")
+                for k, s in e["social"].items()))
         if a["themes"]:
             md.append("- **Recurring AI terms** (inference: what its AI news is about): "
                       + ", ".join(f"{t} ({c})" for t, c in a["themes"]))

@@ -382,3 +382,32 @@ def test_review_fixes():
     assert 'href="https://en.wikipedia.org/wiki/Foo_(bar)"' in _inline(
         "[x](https://en.wikipedia.org/wiki/Foo_(bar))")
     assert "%22" in _inline('[x](https://a.b/q?"x")')
+
+
+# ---- phase 6/7 ----
+
+def test_social_parse():
+    from backend.company.social import parse
+    assert parse("7M Followers, 9 Following, 1,918 Posts - See Instagram photos") == \
+        {"followers": "7M", "following": "9", "posts": "1,918"}
+    assert parse("Meta. 106,989,335 followers · 406,099 talking about this.") == \
+        {"followers": "106,989,335", "talking_about": "406,099"}
+    assert parse("Log in to Facebook") == {}
+
+
+def test_company_web_routes(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.company import web
+    monkeypatch.setattr(web, "OUT", tmp_path)
+    (tmp_path / "acme" / "2026-11-11").mkdir(parents=True)
+    (tmp_path / "acme" / "2026-11-11" / "report.pdf").write_bytes(b"%PDF-1.4")
+    app = FastAPI()
+    app.include_router(web.router)
+    c = TestClient(app)
+    assert c.get("/api/company/reports").json()[0]["report"] == "acme/2026-11-11"
+    assert c.get("/api/company/reports/acme/2026-11-11/report.pdf").content == b"%PDF-1.4"
+    assert c.get("/api/company/reports/acme/2026-11-11/raw.json").status_code == 400
+    assert c.get("/api/company/reports/..%2F..%2Fx/2026-11-11/report.pdf").status_code in (400, 404)
+    assert c.post("/api/company/runs", json={"name": "  "}).status_code == 400
+    assert c.get("/api/company/runs/nope").status_code == 404

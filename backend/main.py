@@ -12,6 +12,7 @@ from slowapi.errors import RateLimitExceeded
 import re
 
 from . import cache, jobs, pdf, quota, worker
+from .company import web as company_web
 from .config import settings
 from .instagram import service as instagram_service
 from .llm import server as llm_server
@@ -300,6 +301,8 @@ async def api_instagram(request: Request, username: str, refresh: bool = False):
     cache.set(key, "list" if data.get("available") else "ig_fail", data)
     return envelope(data, False, cache._iso(time.time()))
 
+
+app.include_router(company_web.router)  # company reports: /company.html
 
 # Frontend (mounted last so /api/* wins).
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
