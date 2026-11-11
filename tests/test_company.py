@@ -162,3 +162,24 @@ def test_overall_dedupes_across_categories():
     r = cp.overall(per, 10)
     assert [(x["qid"], x["categories"], x["confidence"]) for x in r] == [
         ("MS", ["Cloud", "Search"], "high"), ("AWS", ["Cloud"], "high")]
+
+
+def test_own_product_label_filtered_even_with_other_qid(monkeypatch):
+    monkeypatch.setattr(cp, "web_search", lambda q, e: [
+        {"title": "Google vs Bing", "url": f"https://{d}/x", "engine": "ddgs"} for d in "abc"])
+    monkeypatch.setattr(wd, "search", lambda n, e, prefer_company=True: {"Bing": "QB2", "Google": "QG"}[n])
+    ents = {"QB2": _ent("QB2", "Bing", "Bing"), "QG": _ent("QG", "Google", "Google")}
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {i: ents[i] for i in ids if i in ents})
+    cat = {"qid": "QB1", "label": "Microsoft Bing", "enwiki": "Microsoft Bing"}
+    r = cp.for_category(cat, {"QB1"}, ["microsoft", "microsoft bing", "bing"], 3, [])
+    assert [c["label"] for c in r["competitors"]] == ["Google"]
+
+
+def test_discover_strips_company_prefix_from_own_labels(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cp, "for_category",
+                        lambda cat, own, names, n, e: seen.setdefault("names", names) and {
+                            "category": "x", "competitors": []})
+    cp.discover({"categories": [{"qid": "Q"}], "own_names": ["Microsoft"],
+                 "own_labels": ["Microsoft Bing", "Xbox"]})
+    assert {"microsoft", "microsoft bing", "bing", "xbox"} <= set(seen["names"])

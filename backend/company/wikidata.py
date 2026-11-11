@@ -232,6 +232,9 @@ def resolve(name: str, top: int = 5, today: date | None = None) -> dict:
         "via_child": {"qid": child["id"], "label": label(child)} if child else None,
         "own_entities": sorted(own),  # Phase 2 drops these as "competitors"
         "own_names": [base_name(label(x)) for x in (ent, child) if x],
+        # exact labels of every own product/subsidiary: "Bing" may resolve to a
+        # different QID than Microsoft's "Microsoft Bing" item
+        "own_labels": sorted({label(e) for e in cand_ents.values()}),
         "categories": cats[:top],
     })
     return out

@@ -132,7 +132,7 @@ def _verify(names: list[str], own: set[str], own_names: list[str],
         if makers & own:  # Waze (parent: Google), Pixel (manufacturer: Google)
             continue
         lbl = _norm(wd.label(e))
-        if any(lbl == o or lbl.startswith(o + " ") for o in own_names):  # "Google Earth"
+        if any(lbl == o or lbl.startswith(o + " ") for o in own_names)                 or _norm(n) in own_names or lbl in own_names:  # "Google Earth", "Bing"
             continue
         out[n] = e
     return out
@@ -225,6 +225,10 @@ def discover(company: dict, per_category: int = 3, top: int = 10,
                 "errors": errors}
     own = set(company.get("own_entities") or [])
     own_names = [_norm(x) for x in (company.get("own_names") or []) if x]
+    labels = [_norm(x) for x in (company.get("own_labels") or []) if x]
+    # "Microsoft Bing" is also just "Bing"
+    own_names += labels + [lb[len(o) + 1:] for lb in labels for o in own_names
+                           if lb.startswith(o + " ")]
     per_cat = [for_category(c, own, own_names, per_category, errors)
                for c in company.get("categories") or []]
     return {"mode": "search",
