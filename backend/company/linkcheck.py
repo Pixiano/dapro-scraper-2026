@@ -24,12 +24,15 @@ def check(url: str, client: httpx.Client) -> dict:
     try:
         if m:
             r = client.get(HN_API.format(m[1]))
-            missing = r.status_code == 200 and r.text.strip() == "null"
-            code = 404 if missing else r.status_code
+            body = r.json() if r.status_code == 200 else {}
+            gone = r.status_code == 200 and (not body or body.get("deleted") or body.get("dead"))
+            code = 404 if gone else r.status_code
         else:
             with client.stream("GET", url) as r:  # body never read
                 code = r.status_code
-    except (httpx.ConnectError, httpx.UnsupportedProtocol):
+    except (httpx.ConnectError, httpx.UnsupportedProtocol) as exc:
+        if re.search(r"ssl|certificate", str(exc), re.I):  # reachable, TLS trouble
+            return {"status": "unverified", "code": None, "note": "TLS"}
         return {"status": "dead", "code": None}
     except Exception as exc:
         return {"status": "unverified", "code": None, "note": type(exc).__name__}

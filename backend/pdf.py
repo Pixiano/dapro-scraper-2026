@@ -96,8 +96,10 @@ def _styles(family: str) -> dict:
 def _inline(s: str) -> str:
     """Markdown inline → reportlab mini-markup, XML-escaping text first."""
     s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
-               r'<a href="\2" color="#33518f">\1</a>', s)
+    # one level of balanced parens (Wikipedia "Foo_(bar)"); a raw " would end href=
+    s = re.sub(r"\[([^\]]+)\]\((https?://(?:[^()\s]|\([^()\s]*\))+)\)",
+               lambda m: f'<a href="{m[2].replace(chr(34), "%22")}" color="#33518f">{m[1]}</a>',
+               s)
     s = re.sub(r"&lt;(https?://[^&\s]+)&gt;",
                r'<a href="\1" color="#33518f">\1</a>', s)
     s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)

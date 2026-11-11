@@ -330,7 +330,7 @@ def test_linkcheck_status_rules():
         if req.url.host == "down.test":
             raise httpx.ConnectError("dns")
         if req.url.host == "hacker-news.firebaseio.com":
-            return httpx.Response(200, text="null" if "/1.json" in req.url.path else "{}")
+            return httpx.Response(200, text="null" if "/1.json" in req.url.path else "{\"id\": 2}")
         return httpx.Response({"gone": 404, "wall": 403, "ok": 200, "err": 503}[req.url.host])
     c = httpx.Client(transport=httpx.MockTransport(handler))
     st = {h: check(f"https://{h}/", c)["status"] for h in ("gone", "wall", "ok", "err", "down.test")}
@@ -361,4 +361,24 @@ def test_build_report_pdf(tmp_path, monkeypatch):
     out = report.build(raw, tmp_path)
     md = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert out["pdf"].exists() and "[Rival LLM beta](u2)" in md and "dead3" not in md
-    assert "Q3 2026 2/3" in md  # counts keep dead-linked items; only the listing drops them
+    assert "Q3 2026 1/3" in md  # "Rival AI" is the name, not AI news
+
+
+# ---- phase 2-4 review fixes ----
+
+def test_review_fixes():
+    from backend.company.collect import _parse_date, feed_items
+    from backend.company.report import ai_terms
+    from backend.pdf import _inline
+    atom = ('<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>t</title>'
+            '<link rel="replies" href="https://b/c#comments"/><link rel="alternate" href="/c"/>'
+            '<updated>2026-11-01T00:00:00Z</updated><published>2026-08-01T00:00:00Z</published>'
+            '</entry></feed>')
+    it = feed_items(atom, "https://b/feed")[0]
+    assert it["link"] == "https://b/c" and it["published"].startswith("2026-08-01")
+    assert _parse_date("Tue, 10 Nov 2026 23:30:00 -0800") == date(2026, 11, 11)
+    assert ai_terms("AI-powered search and Gen-AI push", "X") == ["ai", "ai"]
+    assert ai_terms("Mistral AI raises", "Mistral", "Mistral AI") == []
+    assert 'href="https://en.wikipedia.org/wiki/Foo_(bar)"' in _inline(
+        "[x](https://en.wikipedia.org/wiki/Foo_(bar))")
+    assert "%22" in _inline('[x](https://a.b/q?"x")')

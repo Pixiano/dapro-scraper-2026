@@ -12,7 +12,8 @@ Fail soft: per-source errors are recorded, never raised."""
 import email.utils
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
@@ -71,13 +72,13 @@ def _parse_date(s: str | None) -> date | None:
     if not s:
         return None
     try:
-        return email.utils.parsedate_to_datetime(s).date()  # RSS: RFC 822
+        dt = email.utils.parsedate_to_datetime(s)  # RSS: RFC 822
     except (TypeError, ValueError):
-        pass
-    try:
-        return datetime.fromisoformat(s.strip().replace("Z", "+00:00")).date()  # Atom / ISO
-    except ValueError:
-        return None
+        try:
+            dt = datetime.fromisoformat(s.strip().replace("Z", "+00:00"))  # Atom / ISO
+        except ValueError:
+            return None
+    return (dt.astimezone(timezone.utc) if dt.tzinfo else dt).date()  # bucket in UTC
 
 
 def names_entity(title: str, name: str) -> bool:
@@ -130,7 +131,9 @@ def google_news(name: str, bounds, errors: list[str]) -> list[dict]:
     # one query per month: the feed caps at 100 items per query.
     # ponytail: very loud names (OpenAI) can still hit 100/month; split weekly if needed
     for s, e in months(bounds[0][1], bounds[-1][2]):
-        text, err = news._fetch(news._feed_url(f'"{name}" after:{s} before:{e}'))
+        # after: may be exclusive; start a day early, dedupe + bucketing absorb the overlap
+        text, err = news._fetch(news._feed_url(
+            f'"{name}" after:{s - timedelta(days=1)} before:{e}'))
         if err:
             errors.append(f"google_news: {err}")
             continue
@@ -144,17 +147,22 @@ def google_news(name: str, bounds, errors: list[str]) -> list[dict]:
     return out
 
 
-def feed_items(xml: str) -> list[dict]:
-    """RSS <item> and Atom <entry> -> [{title, link, published}]."""
+def feed_items(xml: str, base: str = "") -> list[dict]:
+    """RSS <item> and Atom <entry> -> [{title, link, published}]. Relative links
+    are resolved against `base` (the feed URL)."""
     soup = BeautifulSoup(xml, "xml")
     out = []
     for it in soup.find_all(["item", "entry"]):
-        link_tag = it.find("link")
+        # Atom: the article is rel="alternate" (Blogger lists rel="replies" first)
+        link_tag = it.find("link", rel="alternate") or it.find("link")
         link = ((link_tag.get("href") or link_tag.get_text(strip=True)) if link_tag else "")
-        pub = it.find(["pubDate", "published", "updated", "dc:date", "date"])
+        # first tag *in this order*: Atom <updated> (last edit) only as a fallback
+        pub = next((t for n in ("pubDate", "published", "dc:date", "date", "updated")
+                    if (t := it.find(n))), None)
         title = it.find("title")
         out.append({"title": title.get_text(strip=True) if title else "",
-                    "link": link, "published": pub.get_text(strip=True) if pub else None})
+                    "link": urljoin(base, str(link)) if link else "",
+                    "published": pub.get_text(strip=True) if pub else None})
     return out
 
 
@@ -163,7 +171,7 @@ def _try_feed(url: str) -> list[dict] | None:
         r = _http(url)
         if r.status_code != 200 or not re.search(r"<(rss|feed|rdf:RDF)\b", r.text[:2000]):
             return None
-        return feed_items(r.text)
+        return feed_items(r.text, str(r.url))
     except Exception:
         return None
 
