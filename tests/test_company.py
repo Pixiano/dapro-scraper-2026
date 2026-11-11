@@ -227,3 +227,63 @@ def test_resolve_url_mismatch_rejects_entity(monkeypatch):
     r = wd.resolve("Adaption", url="https://www.adaption.ai")
     assert r["qid"] is None and r["on_wikidata"] is False
     assert r["links"]["website"] == "https://www.adaption.ai" and r["label"] == "Adaption"
+
+
+# ---- Phase 3: collect ----
+
+from backend.company import collect as co  # noqa: E402
+
+
+def test_quarter_bounds_and_year_edge():
+    b = co.quarter_bounds(date(2026, 11, 11))
+    assert [(l, s.isoformat(), e.isoformat()) for l, s, e in b] == [
+        ("Q2 2026", "2026-04-01", "2026-07-01"), ("Q3 2026", "2026-07-01", "2026-10-01"),
+        ("Q4 2026 (to date)", "2026-10-01", "2026-11-12")]
+    b = co.quarter_bounds(date(2026, 2, 3))
+    assert [l for l, _, _ in b] == ["Q3 2025", "Q4 2025", "Q1 2026 (to date)"]
+    assert co.bucket(date(2026, 9, 30), co.quarter_bounds(date(2026, 11, 11))) == "Q3 2026"
+    assert co.bucket(date(2026, 3, 31), co.quarter_bounds(date(2026, 11, 11))) is None
+
+
+def test_parse_date_formats():
+    assert co._parse_date("Tue, 05 Aug 2026 10:00:00 GMT") == date(2026, 8, 5)
+    assert co._parse_date("2026-08-05T10:00:00Z") == date(2026, 8, 5)
+    assert co._parse_date("2026-08-05T10:00:00.000+00:00") == date(2026, 8, 5)
+    assert co._parse_date("garbage") is None and co._parse_date(None) is None
+
+
+def test_names_entity_word_boundary():
+    assert co.names_entity("Apple launches new AI model", "Apple")
+    assert not co.names_entity("Pineapple prices soar", "Apple")
+    assert co.names_entity("Why Disney+ raised prices", "Disney+")
+
+
+def test_feed_items_rss_and_atom():
+    rss = ("<rss><channel><item><title>A</title><link>https://x/a</link>"
+           "<pubDate>Tue, 05 Aug 2026 10:00:00 GMT</pubDate></item></channel></rss>")
+    atom = ('<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>B</title>'
+            '<link href="https://x/b"/><published>2026-08-06T00:00:00Z</published></entry></feed>')
+    assert co.feed_items(rss) == [{"title": "A", "link": "https://x/a",
+                                   "published": "Tue, 05 Aug 2026 10:00:00 GMT"}]
+    assert co.feed_items(atom) == [{"title": "B", "link": "https://x/b",
+                                    "published": "2026-08-06T00:00:00Z"}]
+
+
+def test_hacker_news_filters_title_and_buckets(monkeypatch):
+    class R:
+        def raise_for_status(self): pass
+        def json(self): return {"hits": [
+            {"title": "OpenAI ships X", "objectID": "1", "created_at": "2026-08-01T00:00:00Z", "points": 99},
+            {"title": "Unrelated", "objectID": "2", "created_at": "2026-08-01T00:00:00Z", "points": 99},
+            {"title": "OpenAI old", "objectID": "3", "created_at": "2025-01-01T00:00:00Z", "points": 99}]}
+    monkeypatch.setattr(co, "_http", lambda url, **p: R())
+    items = co.hacker_news("OpenAI", co.quarter_bounds(date(2026, 11, 11)), [])
+    assert [(i["title"], i["quarter"], i["url"]) for i in items] == [
+        ("OpenAI ships X", "Q3 2026", "https://news.ycombinator.com/item?id=1")]
+
+
+def test_months_split():
+    m = co.months(date(2026, 4, 1), date(2026, 6, 15))
+    assert [(a.isoformat(), b.isoformat()) for a, b in m] == [
+        ("2026-04-01", "2026-05-01"), ("2026-05-01", "2026-06-01"), ("2026-06-01", "2026-06-15")]
+    assert len(co.months(date(2025, 12, 1), date(2026, 2, 1))) == 2  # year edge

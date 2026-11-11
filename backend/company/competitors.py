@@ -268,6 +268,7 @@ def from_names(names: list[str], errors: list[str]) -> list[dict]:
         q = wd.search(n, errors)
         e = wd.get_entities([q], errors).get(q) if q else None
         out.append({"qid": q if e else "name:" + _norm(n), "label": wd.label(e) if e else n,
+                    "name": n,
                     "enwiki": wd.enwiki(e) if e else None, "on_wikidata": e is not None,
                     "wikidata_url": f"https://www.wikidata.org/wiki/{q}" if e else None,
                     "links": wd.links(e) if e else {}, "categories": [], "domains": [],
