@@ -19,6 +19,8 @@ def main() -> None:
                     help="skip the homepage screenshots + local vision model notes")
     ap.add_argument("--social", action="store_true",
                     help="add Instagram/Facebook profile summaries (public page, no login)")
+    ap.add_argument("--context", help='extra word required in news/search for a shared '
+                    'name, e.g. "Gemini" --context crypto')
     ap.add_argument("--fresh", action="store_true",
                     help="ignore cached search/Wikidata results (24 h / 30 d) for this run")
     args = ap.parse_args()
@@ -27,7 +29,8 @@ def main() -> None:
     names = [n.strip() for n in (args.competitors or "").split(",") if n.strip()]
     try:
         r = run(args.name, args.url, args.categories, args.per_category, args.top, names,
-                args.social, vision=not args.no_vision, fresh=args.fresh)
+                args.social, vision=not args.no_vision, fresh=args.fresh,
+                context=args.context)
     finally:
         server.stop()  # free the GPU: the vision model is not needed after the run
     data = r["collected"]

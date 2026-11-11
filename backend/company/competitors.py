@@ -215,7 +215,8 @@ def _queries(cat: dict) -> list[str]:
     x = cat.get("enwiki") or cat["label"]
     if cat.get("self"):  # startup / no product lines: search the company itself
         # quoted: "Multiverse Computing" must not match the edtech Multiverse
-        return [f'"{x}" vs', f'"{x}" competitors', f'"{x}" alternatives']
+        q = f'"{x}" {cat["context"]}' if cat.get("context") else f'"{x}"'  # "Gemini" crypto
+        return [f"{q} vs", f"{q} competitors", f"{q} alternatives"]
     # ponytail: 3 phrasings x 2 engines; ddgs returns ~8-10 hits per query.
     # "alternatives" pages list names that names_from_list can read
     return [f"{x} vs", f"vs {x}", f"{x} alternatives"]
@@ -275,6 +276,7 @@ def for_category(cat: dict, own: set[str], own_names: list[str], per_category: i
         for n in found:
             flat = _norm(n).replace(" ", "")
             if _norm(n) in skip or any(_norm(n).startswith(o + " ") for o in skip) or any(
+                    o.endswith(" " + _norm(n)) for o in skip) or any(  # "Computing" of "Multiverse Computing"
                     len(flat) >= 4 and o.replace(" ", "").startswith(flat) for o in skip):
                 # last rule: "Adaption" is just the start of "AdaptionAI"
                 continue
@@ -391,8 +393,9 @@ def discover(company: dict, per_category: int = 3, top: int = 10,
                            if lb.startswith(o + " ")]
     cats = company.get("categories") or []
     if not cats:  # startup or not on Wikidata: the company is its own category
-        cats = [{"qid": company.get("qid"), "label": company.get("label") or company["query"],
-                 "enwiki": None, "self": True,
+        cats = [{"qid": company.get("qid"), "enwiki": None, "self": True,
+                 "label": company.get("search_name") or company.get("label") or company["query"],
+                 "context": company.get("context"),
                  "site": domain((company.get("links") or {}).get("website") or "") or None}]
     per_cat = [for_category(c, own, own_names, per_category, errors) for c in cats]
     return {"mode": "search" if company.get("categories") else "search-self",

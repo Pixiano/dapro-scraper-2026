@@ -197,9 +197,10 @@ Or in the browser: start the server (see Setup) and open `http://localhost:8123/
 - **Outlook** = this quarter's run-rate vs last quarter (±20% = up/down). A stated rule, not a forecast.
 - **Keys (optional, in `.env`)**: `BRAVE_API_KEY` adds Brave to search; `YOUTUBE_API_KEY` gets full upload history (otherwise RSS, latest 15); `CONTACT_URL` is required by Wikimedia's API rules and is sent only to Wikimedia.
 - **Cache**: web search results are kept 24 h and Wikidata 30 days in `data/app.db`, so a repeat run skips resolve + search (seconds instead of a minute) and stops tripping DuckDuckGo's throttle. Throttled or errored searches are never cached. `--fresh` (or the page checkbox) ignores the cache for one run. News, feeds and link checks are always live.
-- **`--url`** pins the company by its website on Wikidata ("Gemini" + gemini.com → the crypto exchange, not the constellation or the Google model). A Wikidata match with no website is not trusted when `--url` is given.
+- **`--url`** pins the company by its website on Wikidata ("Gemini" + gemini.com → the crypto exchange, not the constellation or the Google model). A Wikidata match with no website is not trusted when `--url` is given. If the plain name means something else on Wikidata, the report says so; add `--context <word>` (or the page's *Context word* field) to require that word in news and search: `python -m backend.company "Gemini" --url https://www.gemini.com --context crypto`.
+- **Categories** under 5% of the top category's Wikipedia pageviews are skipped (Netflix → no Millarworld / Albuquerque Studios): nobody writes "vs" pages about them.
 - **Speed**: ~30 s with `--competitors`; first search run ~45-110 s (DuckDuckGo, ~13 s per category); repeat runs ~20-30 s.
-- **Limits**: DuckDuckGo throttles repeated runs; Google News links are redirect wrappers; Medium feeds give the latest 10 posts; the AI filter is a keyword list, not a classifier.
+- **Limits**: without `BRAVE_API_KEY`, DuckDuckGo alone returns ~8-20 results per query, so smaller categories often end with no medium-confidence competitor; DuckDuckGo throttles repeated runs; Google News links are redirect wrappers; Medium feeds give the latest 10 posts; the AI filter is a keyword list, not a classifier.
 
 Live test (real network, ~20 s): `.venv\Scripts\python -m pytest -m live -k company`
 

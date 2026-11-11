@@ -543,3 +543,21 @@ def test_startup_results_must_name_company():
     assert not cp._relevant({"title": "Multiverse vs Coursera", "url": "https://b.com",
                              "snippet": "Apprenticeship edtech"}, cat)
     assert cp._relevant({"title": "Rivals", "url": "https://multiversecomputing.com/x"}, cat)
+
+
+def test_minor_categories_dropped_and_shared_name_pinned(monkeypatch):
+    ents = {"QN": _ent("QN", "Netflix, Inc.", P1056=[_claim("QS"), _claim("QM")],
+                       P2397=[_claim("UCn", kind="str")]),
+            "QS": _ent("QS", "Netflix", "Netflix"), "QM": _ent("QM", "Millarworld", "Millarworld"),
+            "QE": _ent("QE", "Gemini Intergalactic EU",
+                       P856=[_claim("https://www.gemini.com", kind="str")]),
+            "QG": {**_ent("QG", "Gemini"), "descriptions": {"en": {"value": "constellation"}}}}
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {i: ents[i] for i in ids if i in ents})
+    monkeypatch.setattr(wd, "pageviews", lambda t, e, today=None: {"Netflix": 1000}.get(t, 20))
+    monkeypatch.setattr(wd, "search", lambda n, e, **k: {"Netflix": "QN", "Gemini": "QG"}[n])
+    assert [c["label"] for c in wd.resolve("Netflix")["categories"]] == ["Netflix"]  # 2% cut
+    monkeypatch.setattr(wd, "by_website", lambda u, e: "QE")
+    r = wd.resolve("Gemini", url="https://www.gemini.com")
+    assert r["qid"] == "QE" and r["search_name"] == "Gemini"
+    assert r["ambiguous_with"] == "Gemini (constellation)"
+    assert cp._queries({"label": "Gemini", "self": True, "context": "crypto"})[0] == '"Gemini" crypto vs'

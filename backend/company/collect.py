@@ -102,10 +102,10 @@ def _http(url: str, **params) -> httpx.Response:
 
 # ---- sources ----
 
-def hacker_news(name: str, bounds, errors: list[str]) -> list[dict]:
+def hacker_news(name: str, bounds, errors: list[str], context: str = "") -> list[dict]:
     start = int(datetime.combine(bounds[0][1], datetime.min.time(), timezone.utc).timestamp())
     try:
-        r = _http(HN, query=f'"{name}"', tags="story", hitsPerPage=1000,
+        r = _http(HN, query=f'"{name}" {context}'.strip(), tags="story", hitsPerPage=1000,
                   numericFilters=f"created_at_i>={start},points>{HN_MIN_POINTS}")
         r.raise_for_status()
         hits = r.json().get("hits") or []
@@ -127,14 +127,14 @@ def hacker_news(name: str, bounds, errors: list[str]) -> list[dict]:
     return out
 
 
-def google_news(name: str, bounds, errors: list[str]) -> list[dict]:
+def google_news(name: str, bounds, errors: list[str], context: str = "") -> list[dict]:
     out = []
     # one query per month: the feed caps at 100 items per query.
     # ponytail: very loud names (OpenAI) can still hit 100/month; split weekly if needed
     for s, e in months(bounds[0][1], bounds[-1][2]):
         # after: may be exclusive; start a day early, dedupe + bucketing absorb the overlap
         text, err = news._fetch(news._feed_url(
-            f'"{name}" after:{s - timedelta(days=1)} before:{e}'))
+            f'"{name}" {context} after:{s - timedelta(days=1)} before:{e}'.replace("  ", " ")))
         if err:
             errors.append(f"google_news: {err}")
             continue
@@ -253,7 +253,8 @@ def entity(e: dict, bounds, social: bool = False) -> dict:
     name = e.get("name") or (e.get("matched_names") or [None])[0] or e["label"]
     links = e.get("links") or {}
     blog_items, feed = blogs(links, bounds, errors)
-    items = (hacker_news(name, bounds, errors) + google_news(name, bounds, errors)
+    ctx = e.get("context") or ""  # "crypto": required extra word for a shared name
+    items = (hacker_news(name, bounds, errors, ctx) + google_news(name, bounds, errors, ctx)
              + blog_items + youtube_videos(links.get("youtube"), bounds, errors))
     seen, uniq = set(), []
     for it in items:
@@ -270,7 +271,9 @@ def collect(company: dict, competitors: list[dict], today: date | None = None,
             social: bool = False) -> dict:
     bounds = quarter_bounds(today or date.today())
     targets = [{"label": company.get("label") or company["query"],
-                "name": wd.base_name(company.get("label") or company["query"]),
+                "name": company.get("search_name")
+                or wd.base_name(company.get("label") or company["query"]),
+                "context": company.get("context"),
                 "qid": company.get("qid"),
                 "links": company.get("links") or {}}] + competitors
     # ponytail: 4 threads; sources are different hosts. Raise if runs stay slow.

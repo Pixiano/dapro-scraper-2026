@@ -14,10 +14,11 @@ OUT = BASE_DIR / "data" / "company"
 
 def run(name: str, url: str | None = None, categories: int = 5, per_category: int = 3,
         top: int = 10, names: list[str] | None = None, social: bool = False,
-        vision: bool = True, fresh: bool = False) -> dict:
+        vision: bool = True, fresh: bool = False, context: str | None = None) -> dict:
     pkg.FRESH = fresh  # ponytail: module flag; fine while runs are one at a time (web: 1 worker)
     t0 = time.perf_counter()
     company = wikidata.resolve(name, top=categories, url=url)
+    company["context"] = (context or "").strip() or None
     if not company["links"]["website"]:
         company["links"]["website"] = competitors.guess_website(name, company["errors"])
         company["website_guessed"] = bool(company["links"]["website"])

@@ -173,6 +173,13 @@ def build(raw: dict, out_dir: Path) -> dict:
           "and lists the AI products visible on it. Model output, **unverified**: check "
           "against the screenshot; never used in any count, confidence or outlook.",
           "## Summary"]
+    if company.get("ambiguous_with"):
+        md.append(f"- **Shared name**: without the website pin, Wikidata reads "
+                  f"'{_t(company.get('search_name') or company['label'])}' as "
+                  f"{_t(company['ambiguous_with'])}. "
+                  + (f"News and search required the word '{_t(company['context'])}'."
+                     if company.get("context") else
+                     "News may mix in the other meaning; rerun with `--context <word>`."))
     if len(ents) == 1:  # say it, rather than pad the list with weak matches
         md.append("- **No competitor reached medium confidence** in live search (too little "
                   "coverage, or a name shared with something else). Low-confidence names, if "
@@ -198,7 +205,8 @@ def build(raw: dict, out_dir: Path) -> dict:
                       + (f" · same owner, merged: {_t(', '.join(m['also']))}"
                          if m.get("also") else ""))
             for x in [x for x in (m.get("evidence") or []) if x["url"] in alive][:3]:
-                md.append(f"- Evidence: [{_t(x['title'])}]({x['url']}) "
+                title = x["title"] if len(x["title"]) <= 120 else x["title"][:117] + "..."  # ddgs can glue titles
+                md.append(f"- Evidence: [{_t(title)}]({x['url']}) "
                           f"({_st(x['url'], checks)}, via {x['engine']})")
         prof = [f"[Wikidata]({m['wikidata_url']})"] if m.get("wikidata_url") else []
         prof += [f"[{k}]({v}) ({_st(v, checks)})" for k, v in (e.get("links") or {}).items()

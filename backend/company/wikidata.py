@@ -30,6 +30,7 @@ LINKS = {
 SOCIAL = {"P2397", "P2003", "P2013"}
 # ponytail: candidate cap keeps pageview calls bounded; raise if categories look thin
 MAX_CANDIDATES = 60
+MIN_SHARE = 0.05  # category pageviews vs the top category
 
 
 def _get(url: str, errors: list[str], **params) -> dict:
@@ -203,6 +204,16 @@ def resolve(name: str, top: int = 5, today: date | None = None,
     if not ent:
         errors.append(f"wikidata: no entity found for {name!r}")
         return out
+    if url:
+        # pinned "Gemini" -> "Gemini Intergalactic EU": news/search use the typed
+        # name, and we record what that name means on Wikidata without the pin
+        if base_name(name).lower() in label(ent).lower():
+            out["search_name"] = base_name(name)
+        plain = search(name, errors)
+        if plain and plain != qid:
+            other = get_entities([plain], errors).get(plain)
+            desc = ((other or {}).get("descriptions") or {}).get("en", {}).get("value", plain)
+            out["ambiguous_with"] = f"{label(other)} ({desc})" if other else plain
 
     # Candidate categories (products + subsidiaries), with labels/sitelinks/claims.
     cand_ents = get_entities(_candidates([ent]), errors)
@@ -238,6 +249,9 @@ def resolve(name: str, top: int = 5, today: date | None = None,
         cats.append({"qid": q, "label": label(e), "enwiki": enwiki(e),
                      "pageviews": views.get(q, 0)})
     cats.sort(key=lambda c: -c["pageviews"])
+    # minor holdings (Netflix -> Millarworld) get no "vs" coverage: under 5% of the
+    # top category's pageviews is not a category anyone compares
+    cats = [c for c in cats if c["pageviews"] >= cats[0]["pageviews"] * MIN_SHARE]
     if not cats:  # Spotify Technology lists no products: the "Spotify" service item is the category
         q2 = search(name, errors, prefer_company=False)
         e2 = get_entities([q2], errors).get(q2) if q2 and q2 != qid else None

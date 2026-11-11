@@ -19,6 +19,8 @@
   <input type="text" id="name" required placeholder="Alphabet">
   <label class="lbl" for="url">Official website <span class="opt">(optional: pins startups and ambiguous names)</span></label>
   <input type="text" id="url" placeholder="https://adaptionlabs.ai">
+  <label class="lbl" for="ctx">Context word <span class="opt">(optional: for a shared name, e.g. Gemini + "crypto")</span></label>
+  <input type="text" id="ctx" placeholder="crypto">
   <label class="lbl" for="comps">Competitors <span class="opt">(optional, comma separated: skips the search)</span></label>
   <input type="text" id="comps" placeholder="Anthropic, Mistral AI, Meta">
   <label class="row hint"><input type="checkbox" id="vision" checked> Vision notes: local model reads each homepage screenshot (labelled unverified; needs the GPU)</label>
@@ -55,7 +57,8 @@ $("f").addEventListener("submit", async (ev) => {
   const res = await fetch("/api/company/runs", {method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({name: $("name").value, url: $("url").value || null,
                           competitors: $("comps").value || null, social: $("social").checked,
-                          vision: $("vision").checked, fresh: $("fresh").checked})});
+                          vision: $("vision").checked, fresh: $("fresh").checked,
+                          context: $("ctx").value || null})});
   let run = await res.json();
   while (run.status === "queued" || run.status === "running") {
     $("state").textContent = `${run.status}… ${Math.round((Date.now() - t0) / 1000)} s (search takes about 1–2 minutes)`;
