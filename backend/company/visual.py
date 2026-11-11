@@ -50,7 +50,7 @@ def keep(line: str) -> bool:
     anything with a number or an AI term, and the POSITIONING line."""
     from .report import AI
     s = line.strip().lstrip("-•* ").strip()
-    if re.search(r"cookies?", s, re.I):
+    if re.search(r"\bcookies?\b", s, re.I):
         return False
     return bool(s) and (s.upper().startswith("POSITIONING") or len(s.split()) >= 3
                         or bool(re.search(r"\d", s)) or bool(AI.search(s)))
