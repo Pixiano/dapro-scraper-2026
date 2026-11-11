@@ -8,7 +8,7 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -163,15 +163,29 @@ def _candidates(ents: list[dict]) -> list[str]:
     return seen[:MAX_CANDIDATES]
 
 
-def resolve(name: str, top: int = 5, today: date | None = None) -> dict:
+def _host(url: str | None) -> str:
+    return (urlparse(url or "").netloc or "").lower().removeprefix("www.")
+
+
+def resolve(name: str, top: int = 5, today: date | None = None,
+            url: str | None = None) -> dict:
+    """url (optional) pins the company: a Wikidata hit whose official website is
+    a different domain is rejected as the wrong entity."""
     errors: list[str] = []
-    out: dict = {"query": name, "qid": None, "errors": errors}
+    # Not-on-Wikidata shape (startups): name + website only; Phase 2 then
+    # searches the company itself as its own category.
+    out: dict = {"query": name, "qid": None, "label": name, "on_wikidata": False,
+                 "links": {**{k: None for k, _ in LINKS.values()}, "website": url},
+                 "categories": [], "own_entities": [], "own_names": [base_name(name)],
+                 "own_labels": [], "errors": errors}
     qid = search(name, errors)
-    if not qid:
-        errors.append(f"wikidata: no entity found for {name!r}")
-        return out
-    ent = get_entities([qid], errors).get(qid)
+    ent = get_entities([qid], errors).get(qid) if qid else None
+    site = (claim_values(ent, "P856") or [None])[0] if ent else None
+    if ent and url and site and _host(site) != _host(url):
+        errors.append(f"wikidata: {qid} website {site} != {url}; treated as not on Wikidata")
+        ent = None
     if not ent:
+        errors.append(f"wikidata: no entity found for {name!r}")
         return out
 
     # Candidate categories (products + subsidiaries), with labels/sitelinks/claims.
@@ -220,7 +234,7 @@ def resolve(name: str, top: int = 5, today: date | None = None) -> dict:
         own.add(child["id"])
 
     out.update({
-        "qid": qid,
+        "qid": qid, "on_wikidata": True,
         "label": label(ent),
         "description": (ent.get("descriptions") or {}).get("en", {}).get("value"),
         "wikidata_url": f"https://www.wikidata.org/wiki/{qid}",
@@ -228,7 +242,7 @@ def resolve(name: str, top: int = 5, today: date | None = None) -> dict:
         "founded": founded[0].lstrip("+")[:10].replace("-00", "") if founded else None,
         "headquarters": [label(refs[q]) for q in claim_values(ent, "P159")[:1] if q in refs],
         "industries": [label(refs[q]) for q in claim_values(ent, "P452")[:3] if q in refs],
-        "links": ent_links,
+        "links": {**ent_links, "website": url or ent_links["website"]},
         "via_child": {"qid": child["id"], "label": label(child)} if child else None,
         "own_entities": sorted(own),  # Phase 2 drops these as "competitors"
         "own_names": [base_name(label(x)) for x in (ent, child) if x],

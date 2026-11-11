@@ -44,14 +44,20 @@ def _brave(query: str, errors: list[str]) -> list[dict]:
 
 
 def _ddg(query: str, errors: list[str]) -> list[dict]:
-    try:
-        from ddgs import DDGS
-        return [{"title": x.get("title", ""), "url": x.get("href", ""),
-                 "snippet": x.get("body", ""), "engine": "ddgs"}
-                for x in DDGS().text(query, max_results=RESULTS) or []]
-    except Exception as exc:  # DDGSException / RatelimitException / TimeoutException
-        errors.append(f"ddgs: {type(exc).__name__}: {exc}")
-        return []
+    from ddgs import DDGS
+    for attempt in (1, 2):  # ponytail: one retry; timeouts come in bursts
+        try:
+            return [{"title": x.get("title", ""), "url": x.get("href", ""),
+                     "snippet": x.get("body", ""), "engine": "ddgs"}
+                    for x in DDGS(timeout=15).text(query, max_results=RESULTS) or []]
+        except Exception as exc:  # DDGSException / RatelimitException / TimeoutException
+            if "No results" in str(exc):
+                return []
+            if attempt == 2:
+                errors.append(f"ddgs: {type(exc).__name__}: {exc}")
+            else:
+                time.sleep(3)
+    return []
 
 
 def domain(url: str) -> str:
@@ -109,6 +115,26 @@ def names_from_title(title: str) -> list[str]:
     return out
 
 
+LIST = re.compile(r"\b(?:alternatives|competitors|rivals|similar companies|peers)\b"
+                  r"(?: to [^.:—–]*?)?(?: are| include| including| like| such as)?\s*[:—–-]?\s+"
+                  r"(.+?)(?:\.\s|\.$|$)", re.I)
+STOP = {"top", "best", "compare", "comparison", "review", "reviews", "alternatives",
+        "competitors", "pricing", "the", "free", "new", "find", "see", "explore", "ai", "more"}
+
+
+def names_from_list(text: str) -> list[str]:
+    """"The best X alternatives are Miro, Navan and Autodesk Forma" -> names.
+    ponytail: one list pattern + capitalisation; misses free-form prose."""
+    out: list[str] = []
+    for m in LIST.finditer(text):
+        items = re.sub(r"\([^)]*\)", "", m.group(1))  # "Navan (Formerly TripActions)"
+        for item in re.split(r",\s*(?:and\s+|or\s+)?|\s+and\s+|\s+or\s+", items):
+            name = _take(item.split(), from_end=False)
+            if name and name.lower() not in STOP and name not in out:
+                out.append(name)
+    return out
+
+
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
 
@@ -117,46 +143,69 @@ def confidence(n_domains: int) -> str:
     return "high" if n_domains >= 3 else "medium" if n_domains == 2 else "low"
 
 
+def _down(c: str) -> str:
+    return {"high": "medium", "medium": "low"}.get(c, "low")
+
+
 def _verify(names: list[str], own: set[str], own_names: list[str],
-            errors: list[str]) -> dict[str, dict]:
-    """name -> verified Wikidata entity (enwiki page, not self-owned, not generic)."""
+            errors: list[str]) -> tuple[dict[str, dict], set[str]]:
+    """-> (name -> Wikidata entity, names that are the company's own).
+    Names in neither are "not on Wikidata" (startups) or matched the wrong
+    thing (a person, a generic class) and are kept only as unverified."""
     hits = {n: wd.search(n, errors, prefer_company=False) for n in names}
     ents = wd.get_entities(sorted({q for q in hits.values() if q}), errors)
-    out = {}
+    out, own_hit = {}, set()
     for n, q in hits.items():
+        if _norm(n) in own_names:
+            own_hit.add(n)
+            continue
         e = ents.get(q or "")
-        if not e or not wd.enwiki(e) or wd.is_generic(e) or q in own:
+        if not e:
             continue
         makers = {*wd.claim_values(e, "P749"), *wd.claim_values(e, "P127"),
                   *wd.claim_values(e, "P176"), *wd.claim_values(e, "P178")}
-        if makers & own:  # Waze (parent: Google), Pixel (manufacturer: Google)
-            continue
         lbl = _norm(wd.label(e))
-        if any(lbl == o or lbl.startswith(o + " ") for o in own_names)                 or _norm(n) in own_names or lbl in own_names:  # "Google Earth", "Bing"
+        if q in own or makers & own or lbl in own_names or any(
+                lbl.startswith(o + " ") for o in own_names):  # Waze, Pixel, Google Earth
+            own_hit.add(n)
             continue
-        out[n] = e
-    return out
+        human = "Q5" in wd.claim_values(e, "P31")  # "Zapata" -> Emiliano Zapata
+        if wd.enwiki(e) and not wd.is_generic(e) and not human:
+            out[n] = e
+    return out, own_hit
+
+
+def _queries(cat: dict) -> list[str]:
+    x = cat.get("enwiki") or cat["label"]
+    if cat.get("self"):  # startup / no product lines: search the company itself
+        return [f"{x} vs", f"{x} competitors", f"{x} alternatives"]
+    # ponytail: 3 phrasings x 2 engines; ddgs returns ~8-10 hits per query
+    return [f"{x} vs", f"vs {x}", f"{x} versus comparison"]
 
 
 def for_category(cat: dict, own: set[str], own_names: list[str], per_category: int,
                  errors: list[str]) -> dict:
-    x = cat["enwiki"] or cat["label"]
-    # ponytail: 3 phrasings x 2 engines; ddgs returns ~8-10 hits per query
-    queries = [f"{x} vs", f"vs {x}", f"{x} versus comparison"]
+    queries = _queries(cat)
     seen, results = set(), []
     for q in queries:
         for r in web_search(q, errors):
             if r["url"] not in seen:
                 seen.add(r["url"])
                 results.append(r)
+    skip = {_norm(cat["label"]), _norm(cat.get("enwiki") or "")} | set(own_names)
+    skip.discard("")
     by_name: dict[str, dict] = {}
     for r in results:
-        # snippet sentences carry "X vs Y" too; one domain counts once per name
-        found = names_from_title(r["title"])
-        for sent in re.split(r"(?<=[.!?])\s+", r.get("snippet") or ""):
-            found += [n for n in names_from_title(sent) if n not in found]
+        # titles + snippet sentences: "X vs Y" and "alternatives are A, B and C"
+        found: list[str] = []
+        for text in [r["title"]] + re.split(r"(?<=[.!?])\s+", r.get("snippet") or ""):
+            found += [n for n in names_from_title(text) + names_from_list(text)
+                      if n not in found]
         for n in found:
-            if _norm(n) in (_norm(cat["label"]), _norm(cat["enwiki"] or "")):
+            flat = _norm(n).replace(" ", "")
+            if _norm(n) in skip or any(_norm(n).startswith(o + " ") for o in skip) or any(
+                    len(flat) >= 4 and o.replace(" ", "").startswith(flat) for o in skip):
+                # last rule: "Adaption" is just the start of "AdaptionAI"
                 continue
             slot = by_name.setdefault(n, {"domains": set(), "evidence": []})
             slot["domains"].add(domain(r["url"]))
@@ -164,20 +213,29 @@ def for_category(cat: dict, own: set[str], own_names: list[str], per_category: i
                 slot["evidence"].append({"title": r["title"], "url": r["url"],
                                          "engine": r["engine"]})
     names = sorted(by_name, key=lambda n: -len(by_name[n]["domains"]))[:MAX_NAMES]
-    verified = _verify(names, own | {cat["qid"]}, own_names, errors)
+    verified, own_hit = _verify(names, own | {cat["qid"]} - {None}, own_names, errors)
 
     merged: dict[str, dict] = {}  # by QID: "Azure" and "Microsoft Azure" are one
-    for n, e in verified.items():
-        m = merged.setdefault(e["id"], {
-            "qid": e["id"], "label": wd.label(e), "enwiki": wd.enwiki(e),
-            "wikidata_url": f"https://www.wikidata.org/wiki/{e['id']}",
-            "links": wd.links(e), "matched_names": [], "domains": set(), "evidence": []})
+    for n in names:
+        if n in own_hit:
+            continue
+        e = verified.get(n)
+        if e is None and len(by_name[n]["domains"]) < 2:
+            continue  # unverified + single source = noise (GrubMarket)
+        key = e["id"] if e else "name:" + _norm(n)
+        m = merged.setdefault(key, {
+            "qid": key, "label": wd.label(e) if e else n,
+            "enwiki": wd.enwiki(e) if e else None, "on_wikidata": e is not None,
+            "wikidata_url": f"https://www.wikidata.org/wiki/{key}" if e else None,
+            "links": wd.links(e) if e else {}, "matched_names": [],
+            "domains": set(), "evidence": []})
         m["matched_names"].append(n)
         m["domains"] |= by_name[n]["domains"]
         m["evidence"] += [x for x in by_name[n]["evidence"] if x not in m["evidence"]][:5]
-    comps = sorted(merged.values(), key=lambda m: -len(m["domains"]))
+    comps = sorted(merged.values(), key=lambda m: (-len(m["domains"]), not m["on_wikidata"]))
     for m in comps:
-        m["confidence"] = confidence(len(m["domains"]))
+        c = confidence(len(m["domains"]))
+        m["confidence"] = c if m["on_wikidata"] else _down(c)
         m["domains"] = sorted(m["domains"])
     main = [m for m in comps if m["confidence"] != "low"]
     return {"category": cat["label"], "category_qid": cat["qid"], "queries": queries,
@@ -197,24 +255,45 @@ def overall(per_cat: list[dict], top: int) -> list[dict]:
             a["domains"] = sorted(set(a["domains"]) | set(m["domains"]))
     ranked = sorted(agg.values(), key=lambda a: (-len(a["categories"]), -len(a["domains"])))
     for a in ranked:
-        a["confidence"] = confidence(len(a["domains"]))
+        conf = confidence(len(a["domains"]))
+        a["confidence"] = conf if a.get("on_wikidata", True) else _down(conf)
     return ranked[:top]
 
 
 def from_names(names: list[str], errors: list[str]) -> list[dict]:
-    """--competitors override: Wikidata lookup only, no web search."""
+    """--competitors override: Wikidata lookup only, no web search. Names not on
+    Wikidata are kept (the user vouched for them), marked on_wikidata=False."""
     out: list[dict] = []
     for n in names:
         q = wd.search(n, errors)
         e = wd.get_entities([q], errors).get(q) if q else None
-        if not e:
-            errors.append(f"competitor {n!r}: not found on Wikidata")
-            continue
-        out.append({"qid": q, "label": wd.label(e), "enwiki": wd.enwiki(e),
-                    "wikidata_url": f"https://www.wikidata.org/wiki/{q}",
-                    "links": wd.links(e), "categories": [], "domains": [],
+        out.append({"qid": q if e else "name:" + _norm(n), "label": wd.label(e) if e else n,
+                    "enwiki": wd.enwiki(e) if e else None, "on_wikidata": e is not None,
+                    "wikidata_url": f"https://www.wikidata.org/wiki/{q}" if e else None,
+                    "links": wd.links(e) if e else {}, "categories": [], "domains": [],
                     "evidence": [], "confidence": "user-supplied"})
     return out
+
+
+AGGREGATORS = ("wikipedia.org", "linkedin.com", "crunchbase.com", "g2.com", "tracxn.com",
+               "cbinsights.com", "getlatka.com", "pitchbook.com", "zoominfo.com",
+               "facebook.com", "x.com", "twitter.com", "instagram.com", "youtube.com",
+               "medium.com", "github.com", "reddit.com", "bloomberg.com", "glassdoor.com")
+
+
+def guess_website(name: str, errors: list[str]) -> str | None:
+    """First search hit whose domain contains the name (adaptionlabs.ai for
+    "Adaption Labs"), skipping profile/aggregator sites. ponytail: heuristic,
+    --url is the reliable path."""
+    key = _norm(name).replace(" ", "")
+    first = key[:max(4, len(key) // 2)]
+    for r in web_search(f"{name} official site", errors):
+        d = domain(r["url"])
+        if any(d == a or d.endswith("." + a) for a in AGGREGATORS):
+            continue
+        if first and first in d.replace("-", "").replace(".", ""):
+            return f"https://{d}"
+    return None
 
 
 def discover(company: dict, per_category: int = 3, top: int = 10,
@@ -229,8 +308,11 @@ def discover(company: dict, per_category: int = 3, top: int = 10,
     # "Microsoft Bing" is also just "Bing"
     own_names += labels + [lb[len(o) + 1:] for lb in labels for o in own_names
                            if lb.startswith(o + " ")]
-    per_cat = [for_category(c, own, own_names, per_category, errors)
-               for c in company.get("categories") or []]
-    return {"mode": "search",
+    cats = company.get("categories") or []
+    if not cats:  # startup or not on Wikidata: the company is its own category
+        cats = [{"qid": company.get("qid"), "label": company.get("label") or company["query"],
+                 "enwiki": None, "self": True}]
+    per_cat = [for_category(c, own, own_names, per_category, errors) for c in cats]
+    return {"mode": "search" if company.get("categories") else "search-self",
             "engines_configured": ["brave"] * bool(settings.brave_api_key) + ["ddgs"],
             "per_category": per_cat, "overall": overall(per_cat, top), "errors": errors}

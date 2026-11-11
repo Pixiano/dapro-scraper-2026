@@ -183,3 +183,47 @@ def test_discover_strips_company_prefix_from_own_labels(monkeypatch):
     cp.discover({"categories": [{"qid": "Q"}], "own_names": ["Microsoft"],
                  "own_labels": ["Microsoft Bing", "Xbox"]})
     assert {"microsoft", "microsoft bing", "bing", "xbox"} <= set(seen["names"])
+
+
+# ---- Phase 2b: startups / not on Wikidata ----
+
+def test_names_from_list_snippets():
+    f = cp.names_from_list
+    assert f("The best Adaption Labs alternatives are Miro, Navan (Formerly TripActions), and Autodesk Forma") \
+        == ["Miro", "Navan", "Autodesk Forma"]
+    assert f("Compare the top Multiverse Computing alternatives — OpenAI, Cursor by Anysphere and GrubMarket") \
+        == ["OpenAI", "Cursor", "GrubMarket"]
+    assert f("Find top-ranking free apps similar to X for your needs") == []
+
+
+def test_unverified_names_need_two_domains(monkeypatch):
+    monkeypatch.setattr(cp, "web_search", lambda q, e: [
+        {"title": "Top Acme alternatives", "url": f"https://{d}/x", "engine": "ddgs",
+         "snippet": s} for d, s in [("a.com", "Acme competitors include Zeta Labs and Omni."),
+                                    ("b.com", "Acme competitors: Zeta Labs, Kappa.")]])
+    monkeypatch.setattr(wd, "search", lambda n, e, prefer_company=True: None)  # none on Wikidata
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {})
+    r = cp.for_category({"qid": None, "label": "Acme", "enwiki": None, "self": True},
+                        set(), ["acme"], 3, [])
+    # Zeta Labs: 2 domains -> medium, downgraded to low (not on Wikidata) -> appendix
+    assert r["competitors"] == []
+    assert [(c["label"], c["on_wikidata"], c["confidence"]) for c in r["appendix"]] == [
+        ("Zeta Labs", False, "low")]
+    assert r["queries"] == ["Acme vs", "Acme competitors", "Acme alternatives"]
+
+
+def test_discover_falls_back_to_self_category(monkeypatch):
+    got = {}
+    monkeypatch.setattr(cp, "for_category", lambda cat, *a: got.setdefault("cat", cat) and {
+        "category": cat["label"], "competitors": []})
+    r = cp.discover({"query": "Acme", "label": "Acme", "qid": None, "categories": []})
+    assert got["cat"]["self"] is True and r["mode"] == "search-self"
+
+
+def test_resolve_url_mismatch_rejects_entity(monkeypatch):
+    ents = {"Q1": _ent("Q1", "Adaptation", P856=[_claim("https://other.org", kind="str")])}
+    monkeypatch.setattr(wd, "search", lambda n, e, prefer_company=True: "Q1")
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {i: ents[i] for i in ids if i in ents})
+    r = wd.resolve("Adaption", url="https://www.adaption.ai")
+    assert r["qid"] is None and r["on_wikidata"] is False
+    assert r["links"]["website"] == "https://www.adaption.ai" and r["label"] == "Adaption"
