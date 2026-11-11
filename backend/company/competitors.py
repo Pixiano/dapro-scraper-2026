@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..config import settings
+from . import cached
 from . import wikidata as wd
 
 BRAVE = "https://api.search.brave.com/res/v1/web/search"
@@ -65,15 +66,30 @@ def domain(url: str) -> str:
 
 
 def web_search(query: str, errors: list[str]) -> list[dict]:
-    """Brave + ddgs merged, deduped by URL, ads dropped."""
-    seen, out = set(), []
-    for r in _brave(query, errors) + _ddg(query, errors):
-        d = domain(r["url"])
-        if not d or r["url"] in seen or any(d == a or d.endswith("." + a) for a in AD_HOSTS):
-            continue
-        seen.add(r["url"])
-        out.append(r)
-    return out
+    """Brave + ddgs merged, deduped by URL, ads dropped. Cached 24 h, but only
+    when no engine errored (a throttled half-result must be retried)."""
+    n = len(errors)
+
+    def run() -> list[dict]:
+        seen, out = set(), []
+        for r in _brave(query, errors) + _ddg(query, errors):
+            d = domain(r["url"])
+            if not d or r["url"] in seen or any(d == a or d.endswith("." + a)
+                                                for a in AD_HOSTS):
+                continue
+            seen.add(r["url"])
+            out.append(r)
+        return out
+    # key includes whether Brave is on: adding a key must not serve ddgs-only results
+    return cached(f"search:{bool(settings.brave_api_key)}:{query}", "list", run,
+                  ok=lambda v: bool(v) and len(errors) == n)
+
+
+# Headline Title Case filler around "X vs Y" ("The Gemini vs ChatGPT Showdown").
+# ponytail: word list; extend when junk names show up in appendices
+EDGE = {"the", "is", "why", "which", "best", "top", "showdown", "comparison", "review",
+        "worth", "it", "matters", "in", "explained", "battle", "guide", "who",
+        "what", "how", "should", "you", "use", "a", "an", "vs", "test", "tested"}
 
 
 def _is_name_word(w: str) -> bool:
@@ -89,11 +105,15 @@ def _take(words: list[str], from_end: bool) -> str:
         picked.append(w)
     if from_end:
         picked.reverse()
-    while picked and (picked[0].isdigit() or picked[0] in "&+"):  # "2026", stray "&"
+
+    def junk(w: str) -> bool:  # "2026", stray "&", title-case filler ("The", "Showdown")
+        return w.isdigit() or w in "&+" or w.lower().strip("?!.:") in EDGE | STOP
+    while picked and junk(picked[0]):
         picked.pop(0)
-    while picked and (picked[-1].isdigit() or picked[-1] in "&+"):
+    while picked and junk(picked[-1]):
         picked.pop()
-    return " ".join(picked).strip("\"'“”‘’.")
+    name = " ".join(picked).strip("\"'“”‘’.")
+    return name if any(c.isalpha() for c in name) else ""  # "1", "#2"
 
 
 def names_from_title(title: str) -> list[str]:
@@ -119,7 +139,9 @@ LIST = re.compile(r"\b(?:alternatives|competitors|rivals|similar companies|peers
                   r"(?: to [^.:—–]*?)?(?: are| include| including| like| such as)?\s*[:—–-]?\s+"
                   r"(.+?)(?:\.\s|\.$|$)", re.I)
 STOP = {"top", "best", "compare", "comparison", "review", "reviews", "alternatives",
-        "competitors", "pricing", "the", "free", "new", "find", "see", "explore", "ai", "more"}
+        "competitors", "pricing", "the", "free", "new", "find", "see", "explore", "ai", "more",
+        "cost", "costs", "cons", "pros", "features", "listen",
+        "ai-powered", "email"}
 
 
 def names_from_list(text: str) -> list[str]:
@@ -147,12 +169,27 @@ def _down(c: str) -> str:
     return {"high": "medium", "medium": "low"}.get(c, "low")
 
 
+def _makers(e: dict) -> set[str]:
+    """parent org, owner, manufacturer, developer"""
+    return {v for p in ("P749", "P127", "P176", "P178") for v in wd.claim_values(e, p)}
+
+
+def _lookup(n: str, errors: list[str]) -> str | None:
+    """Exact Wikidata label/alias match; else drop one outer word and retry
+    ("ChatGPT Showdown" -> "ChatGPT")."""
+    w = n.split()
+    for cand in [n] + ([" ".join(w[1:]), " ".join(w[:-1])] if len(w) > 1 else []):
+        if q := wd.search(cand, errors, prefer_company=False, exact=True):
+            return q
+    return None
+
+
 def _verify(names: list[str], own: set[str], own_names: list[str],
             errors: list[str]) -> tuple[dict[str, dict], set[str]]:
     """-> (name -> Wikidata entity, names that are the company's own).
     Names in neither are "not on Wikidata" (startups) or matched the wrong
     thing (a person, a generic class) and are kept only as unverified."""
-    hits = {n: wd.search(n, errors, prefer_company=False) for n in names}
+    hits = {n: _lookup(n, errors) for n in names}
     ents = wd.get_entities(sorted({q for q in hits.values() if q}), errors)
     out, own_hit = {}, set()
     for n, q in hits.items():
@@ -162,8 +199,7 @@ def _verify(names: list[str], own: set[str], own_names: list[str],
         e = ents.get(q or "")
         if not e:
             continue
-        makers = {*wd.claim_values(e, "P749"), *wd.claim_values(e, "P127"),
-                  *wd.claim_values(e, "P176"), *wd.claim_values(e, "P178")}
+        makers = _makers(e)
         lbl = _norm(wd.label(e))
         if q in own or makers & own or lbl in own_names or any(
                 lbl.startswith(o + " ") for o in own_names):  # Waze, Pixel, Google Earth
@@ -178,9 +214,38 @@ def _verify(names: list[str], own: set[str], own_names: list[str],
 def _queries(cat: dict) -> list[str]:
     x = cat.get("enwiki") or cat["label"]
     if cat.get("self"):  # startup / no product lines: search the company itself
-        return [f"{x} vs", f"{x} competitors", f"{x} alternatives"]
-    # ponytail: 3 phrasings x 2 engines; ddgs returns ~8-10 hits per query
-    return [f"{x} vs", f"vs {x}", f"{x} versus comparison"]
+        # quoted: "Multiverse Computing" must not match the edtech Multiverse
+        return [f'"{x}" vs', f'"{x}" competitors', f'"{x}" alternatives']
+    # ponytail: 3 phrasings x 2 engines; ddgs returns ~8-10 hits per query.
+    # "alternatives" pages list names that names_from_list can read
+    return [f"{x} vs", f"vs {x}", f"{x} alternatives"]
+
+
+def _relevant(r: dict, cat: dict) -> bool:
+    """Self mode: the result must name the company in full or point at its domain."""
+    text = f" {_norm(r['title'] + ' ' + (r.get('snippet') or ''))} "
+    site = cat.get("site")
+    return f" {_norm(cat['label'])} " in text or bool(site and site in r["url"].lower())
+
+
+def _fold_owned(ms: list[dict]) -> list[dict]:
+    """Best-first entries sharing an owner/maker, or owning one another, become
+    one (Prime Video + Amazon Prime, both Amazon's). The rest are listed in "also"."""
+    out: list[dict] = []
+    seen: dict[str, dict] = {}
+    for m in ms:
+        keys = [m["qid"], *m.get("owners", [])]
+        hit = next((seen[k] for k in keys if k in seen), None)
+        if hit is None:
+            out.append(m)
+            seen.update(dict.fromkeys(keys, m))
+            continue
+        hit["also"] = [*hit.get("also", []), m["label"]]
+        hit["matched_names"] = [*hit.get("matched_names", []), *m.get("matched_names", [])]
+        for k in ("domains", "categories"):
+            if k in hit:
+                hit[k] = sorted(set(hit[k]) | set(m.get(k, [])))
+    return out
 
 
 def for_category(cat: dict, own: set[str], own_names: list[str], per_category: int,
@@ -189,9 +254,15 @@ def for_category(cat: dict, own: set[str], own_names: list[str], per_category: i
     seen, results = set(), []
     for q in queries:
         for r in web_search(q, errors):
-            if r["url"] not in seen:
+            if r["url"] not in seen and (not cat.get("self") or _relevant(r, cat)):
                 seen.add(r["url"])
                 results.append(r)
+    # Same-class check: Spotify's rivals share "music streaming service"; Lifewire
+    # (a publisher) does not. Off-class drops one confidence level, never removed:
+    # thin Wikidata classes must not hide real competitors.
+    cat_ent = (wd.get_entities([cat["qid"]], errors).get(cat["qid"])
+               if cat.get("qid") and not cat.get("self") else None)
+    classes = set(wd.claim_values(cat_ent, "P31")) if cat_ent else set()
     skip = {_norm(cat["label"]), _norm(cat.get("enwiki") or "")} | set(own_names)
     skip.discard("")
     by_name: dict[str, dict] = {}
@@ -223,19 +294,25 @@ def for_category(cat: dict, own: set[str], own_names: list[str], per_category: i
         if e is None and len(by_name[n]["domains"]) < 2:
             continue  # unverified + single source = noise (GrubMarket)
         key = e["id"] if e else "name:" + _norm(n)
+        makers = _makers(e) if e else set()
         m = merged.setdefault(key, {
             "qid": key, "label": wd.label(e) if e else n,
             "enwiki": wd.enwiki(e) if e else None, "on_wikidata": e is not None,
             "wikidata_url": f"https://www.wikidata.org/wiki/{key}" if e else None,
             "links": wd.links(e) if e else {}, "matched_names": [],
+            # >2 owners = a public company's shareholder list, useless for merging
+            "owners": sorted(makers) if len(makers) <= 2 else [],
+            "off_class": bool(e and classes and not set(wd.claim_values(e, "P31")) & classes),
             "domains": set(), "evidence": []})
         m["matched_names"].append(n)
         m["domains"] |= by_name[n]["domains"]
         m["evidence"] += [x for x in by_name[n]["evidence"] if x not in m["evidence"]][:5]
-    comps = sorted(merged.values(), key=lambda m: (-len(m["domains"]), not m["on_wikidata"]))
+    rank = lambda m: (-len(m["domains"]), not m["on_wikidata"])  # noqa: E731
+    comps = sorted(_fold_owned(sorted(merged.values(), key=rank)), key=rank)
     for m in comps:
         c = confidence(len(m["domains"]))
-        m["confidence"] = c if m["on_wikidata"] else _down(c)
+        c = c if m["on_wikidata"] else _down(c)
+        m["confidence"] = _down(c) if m["off_class"] else c
         m["domains"] = sorted(m["domains"])
     main = [m for m in comps if m["confidence"] != "low"]
     return {"category": cat["label"], "category_qid": cat["qid"], "queries": queries,
@@ -253,10 +330,13 @@ def overall(per_cat: list[dict], top: int) -> list[dict]:
             a = agg.setdefault(m["qid"], {**m, "categories": [], "domains": []})
             a["categories"].append(c["category"])
             a["domains"] = sorted(set(a["domains"]) | set(m["domains"]))
-    ranked = sorted(agg.values(), key=lambda a: (-len(a["categories"]), -len(a["domains"])))
+            a["off_class"] = a.get("off_class") and m.get("off_class")  # on-class anywhere wins
+    rank = lambda a: (-len(a["categories"]), -len(a["domains"]))  # noqa: E731
+    ranked = sorted(_fold_owned(sorted(agg.values(), key=rank)), key=rank)
     for a in ranked:
         conf = confidence(len(a["domains"]))
-        a["confidence"] = conf if a.get("on_wikidata", True) else _down(conf)
+        conf = conf if a.get("on_wikidata", True) else _down(conf)
+        a["confidence"] = _down(conf) if a.get("off_class") else conf
     return ranked[:top]
 
 
@@ -312,7 +392,8 @@ def discover(company: dict, per_category: int = 3, top: int = 10,
     cats = company.get("categories") or []
     if not cats:  # startup or not on Wikidata: the company is its own category
         cats = [{"qid": company.get("qid"), "label": company.get("label") or company["query"],
-                 "enwiki": None, "self": True}]
+                 "enwiki": None, "self": True,
+                 "site": domain((company.get("links") or {}).get("website") or "") or None}]
     per_cat = [for_category(c, own, own_names, per_category, errors) for c in cats]
     return {"mode": "search" if company.get("categories") else "search-self",
             "engines_configured": ["brave"] * bool(settings.brave_api_key) + ["ddgs"],

@@ -23,6 +23,7 @@
   <input type="text" id="comps" placeholder="Anthropic, Mistral AI, Meta">
   <label class="row hint"><input type="checkbox" id="vision" checked> Vision notes: local model reads each homepage screenshot (labelled unverified; needs the GPU)</label>
   <label class="row hint"><input type="checkbox" id="social"> Add Instagram / Facebook profile numbers (public page, no login)</label>
+  <label class="row hint"><input type="checkbox" id="fresh"> Fresh search: ignore cached search / Wikidata results (repeat runs are much faster with the cache)</label>
   <div class="row submit-row">
     <button id="go">Build report</button>
     <span class="hint" id="state" role="status" aria-live="polite"></span>
@@ -54,7 +55,7 @@ $("f").addEventListener("submit", async (ev) => {
   const res = await fetch("/api/company/runs", {method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({name: $("name").value, url: $("url").value || null,
                           competitors: $("comps").value || null, social: $("social").checked,
-                          vision: $("vision").checked})});
+                          vision: $("vision").checked, fresh: $("fresh").checked})});
   let run = await res.json();
   while (run.status === "queued" || run.status === "running") {
     $("state").textContent = `${run.status}… ${Math.round((Date.now() - t0) / 1000)} s (search takes about 1–2 minutes)`;

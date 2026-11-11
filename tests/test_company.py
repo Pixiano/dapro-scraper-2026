@@ -2,7 +2,16 @@
 
 from datetime import date
 
+import pytest
+
 from backend.company import wikidata as wd
+from backend.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _tmp_cache(monkeypatch, tmp_path):
+    """The persistent search/Wikidata cache must never leak between tests or into data/."""
+    monkeypatch.setattr(settings, "db_path", tmp_path / "app.db")
 
 
 def _claim(pid_val, rank="normal", kind="id"):
@@ -101,6 +110,18 @@ def test_resolve_keeps_product_lines_and_skips_shareholders(monkeypatch):
     assert r["via_child"] is None  # has socials -> not a holding company
 
 
+def test_resolve_no_products_uses_same_named_service(monkeypatch):
+    ents = {"QC": _ent("QC", "Spotify Technology", P2397=[_claim("UCs", kind="str")]),
+            "QS": _ent("QS", "Spotify", "Spotify", P178=[_claim("QC")]),
+            "QX": _ent("QX", "Gemini", "Gemini (constellation)")}
+    pick = {"Spotify": "QS", "Gemini": "QX"}
+    monkeypatch.setattr(wd, "search", lambda n, e, prefer_company=True: "QC" if prefer_company else pick[n])
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {i: ents[i] for i in ids if i in ents})
+    r = wd.resolve("Spotify")
+    assert [c["qid"] for c in r["categories"]] == ["QS"] and "QS" in r["own_entities"]
+    assert wd.resolve("Gemini")["categories"] == []  # not theirs: the constellation stays out
+
+
 def test_resolve_not_found(monkeypatch):
     monkeypatch.setattr(wd, "search", lambda n, e: None)
     r = wd.resolve("Nope Corp")
@@ -146,7 +167,7 @@ def test_for_category_filters_self_owned_and_ranks(monkeypatch):
             "QWZ": _ent("QWZ", "Waze", "Waze", P749=[_claim("QG")]),
             "QH": _ent("QH", "Here WeGo", "Here WeGo"),
             "QGE": _ent("QGE", "Google Earth", "Google Earth")}
-    monkeypatch.setattr(wd, "search", lambda n, e, prefer_company=True: qids.get(n))
+    monkeypatch.setattr(wd, "search", lambda n, e, **k: qids.get(n))
     monkeypatch.setattr(wd, "get_entities", lambda ids, e: {i: ents[i] for i in ids if i in ents})
     cat = {"qid": "QM", "label": "Google Maps", "enwiki": "Google Maps"}
     r = cp.for_category(cat, {"QG"}, ["google"], 3, [])
@@ -167,7 +188,7 @@ def test_overall_dedupes_across_categories():
 def test_own_product_label_filtered_even_with_other_qid(monkeypatch):
     monkeypatch.setattr(cp, "web_search", lambda q, e: [
         {"title": "Google vs Bing", "url": f"https://{d}/x", "engine": "ddgs"} for d in "abc"])
-    monkeypatch.setattr(wd, "search", lambda n, e, prefer_company=True: {"Bing": "QB2", "Google": "QG"}[n])
+    monkeypatch.setattr(wd, "search", lambda n, e, **k: {"Bing": "QB2", "Google": "QG"}[n])
     ents = {"QB2": _ent("QB2", "Bing", "Bing"), "QG": _ent("QG", "Google", "Google")}
     monkeypatch.setattr(wd, "get_entities", lambda ids, e: {i: ents[i] for i in ids if i in ents})
     cat = {"qid": "QB1", "label": "Microsoft Bing", "enwiki": "Microsoft Bing"}
@@ -201,7 +222,7 @@ def test_unverified_names_need_two_domains(monkeypatch):
         {"title": "Top Acme alternatives", "url": f"https://{d}/x", "engine": "ddgs",
          "snippet": s} for d, s in [("a.com", "Acme competitors include Zeta Labs and Omni."),
                                     ("b.com", "Acme competitors: Zeta Labs, Kappa.")]])
-    monkeypatch.setattr(wd, "search", lambda n, e, prefer_company=True: None)  # none on Wikidata
+    monkeypatch.setattr(wd, "search", lambda n, e, **k: None)  # none on Wikidata
     monkeypatch.setattr(wd, "get_entities", lambda ids, e: {})
     r = cp.for_category({"qid": None, "label": "Acme", "enwiki": None, "self": True},
                         set(), ["acme"], 3, [])
@@ -209,7 +230,7 @@ def test_unverified_names_need_two_domains(monkeypatch):
     assert r["competitors"] == []
     assert [(c["label"], c["on_wikidata"], c["confidence"]) for c in r["appendix"]] == [
         ("Zeta Labs", False, "low")]
-    assert r["queries"] == ["Acme vs", "Acme competitors", "Acme alternatives"]
+    assert r["queries"] == ['"Acme" vs', '"Acme" competitors', '"Acme" alternatives']
 
 
 def test_discover_falls_back_to_self_category(monkeypatch):
@@ -221,12 +242,22 @@ def test_discover_falls_back_to_self_category(monkeypatch):
 
 
 def test_resolve_url_mismatch_rejects_entity(monkeypatch):
-    ents = {"Q1": _ent("Q1", "Adaptation", P856=[_claim("https://other.org", kind="str")])}
-    monkeypatch.setattr(wd, "search", lambda n, e, prefer_company=True: "Q1")
+    ents = {"Q1": _ent("Q1", "Adaptation", P856=[_claim("https://other.org", kind="str")]),
+            "Q2": _ent("Q2", "Gemini")}  # no website: can't be confirmed
+    monkeypatch.setattr(wd, "by_website", lambda u, e: None)
+    monkeypatch.setattr(wd, "search", lambda n, e, **k: {"Adaption": "Q1", "Gemini": "Q2"}[n])
     monkeypatch.setattr(wd, "get_entities", lambda ids, e: {i: ents[i] for i in ids if i in ents})
     r = wd.resolve("Adaption", url="https://www.adaption.ai")
     assert r["qid"] is None and r["on_wikidata"] is False
     assert r["links"]["website"] == "https://www.adaption.ai" and r["label"] == "Adaption"
+    assert wd.resolve("Gemini", url="https://www.gemini.com")["qid"] is None
+
+
+def test_by_website_tries_spellings(monkeypatch):
+    seen = []
+    monkeypatch.setattr(wd, "_get", lambda url, e, **p: seen.append(p["srsearch"]) or (
+        {"query": {"search": [{"title": "QG"}]}} if p["srsearch"].endswith("//gemini.com") else {}))
+    assert wd.by_website("gemini.com/", []) == "QG" and len(seen) == 2
 
 
 # ---- Phase 3: collect ----
@@ -441,3 +472,74 @@ def test_vision_line_filter():
     assert not keep("Accept all cookies") and not keep("- Research") and not keep("Learn more") and not keep("  ")
     assert keep("- Introducing Claude Opus 5.5") and keep("Try ChatGPT")
     assert keep("Sovereign AI") and keep("POSITIONING: an AI lab")
+
+
+# ---- improvements: cache, name cleanup, same-class/owner, ambiguous AI, startups ----
+
+def test_search_cache_skips_errors_and_fresh(monkeypatch):
+    import backend.company as pkg
+    calls = []
+
+    def ok(q, e):
+        calls.append(q)
+        return [{"title": "A vs B", "url": "https://x.com/1", "engine": "ddgs"}]
+
+    def throttled(q, e):
+        calls.append(q)
+        e.append("ddgs: throttled")
+        return [{"title": "t", "url": "https://y.com/1", "engine": "ddgs"}]
+    monkeypatch.setattr(cp, "_brave", lambda q, e: [])
+    monkeypatch.setattr(cp, "_ddg", ok)
+    cp.web_search("q", [])
+    assert cp.web_search("q", [])[0]["url"] == "https://x.com/1" and calls == ["q"]  # cached
+    monkeypatch.setattr(pkg, "FRESH", True)
+    cp.web_search("q", [])
+    assert calls == ["q", "q"]  # --fresh bypasses
+    monkeypatch.setattr(pkg, "FRESH", False)
+    monkeypatch.setattr(cp, "_ddg", throttled)
+    cp.web_search("t", [])
+    cp.web_search("t", [])
+    assert calls.count("t") == 2  # errored half-results are never cached
+
+
+def test_title_case_junk_trimmed_and_exact_wikidata(monkeypatch):
+    f = cp.names_from_title
+    assert f("The Gemini vs ChatGPT Showdown") == ["Gemini", "ChatGPT"]
+    assert f("Is Zoom vs Teams Worth It") == ["Zoom", "Teams"]
+    assert f("Best Netflix vs Disney+ Comparison") == ["Netflix", "Disney+"]
+    monkeypatch.setattr(wd, "_get", lambda *a, **k: {"search": [
+        {"id": "QF", "match": {"text": "Teams Worth It (film)"}},
+        {"id": "QT", "match": {"text": "Teams"}}]})
+    assert wd.search("Teams", [], prefer_company=False, exact=True) == "QT"
+    assert wd.search("Worth", [], exact=True) is None
+    monkeypatch.setattr(wd, "search", lambda n, e, **k: {"ChatGPT": "QC"}.get(n))
+    assert cp._lookup("ChatGPT Showdown", []) == "QC"  # outer word dropped
+
+
+def test_off_class_demoted_and_same_owner_merged():
+    c = lambda q, l, d, owners=(), off=False: {  # noqa: E731, E741
+        "qid": q, "label": l, "domains": d, "owners": list(owners), "off_class": off}
+    per = [{"category": "Video", "competitors": [
+        c("QP", "Prime Video", ["a", "b", "c"], ["QA"]),
+        c("QL", "Lifewire", ["a", "b", "c"], off=True),
+        c("QAP", "Amazon Prime", ["d"], ["QA"])]}]
+    r = cp.overall(per, 10)
+    assert [(x["label"], x.get("also"), len(x["domains"]), x["confidence"]) for x in r] == [
+        ("Prime Video", ["Amazon Prime"], 4, "high"), ("Lifewire", None, 3, "medium")]
+
+
+def test_ambiguous_ai_terms_need_context():
+    from backend.company.report import ai_terms
+    assert ai_terms("Gemini exchange adds Solana staking", "X") == []
+    assert ai_terms("Claude Monet exhibition opens in Paris", "X") == []
+    assert ai_terms("Google Gemini rolls out to Workspace", "Google") == ["gemini"]
+    assert ai_terms("Claude 4 tops coding benchmark", "Anthropic") == ["claude"]
+    assert ai_terms("Copilot gets new AI agents", "X") == ["copilot", "ai agents"]
+
+
+def test_startup_results_must_name_company():
+    cat = {"label": "Multiverse Computing", "self": True, "site": "multiversecomputing.com"}
+    assert cp._relevant({"title": "Multiverse Computing vs Zapata", "url": "https://a.com"}, cat)
+    assert not cp._relevant({"title": "Multiverse vs Coursera", "url": "https://b.com",
+                             "snippet": "Apprenticeship edtech"}, cat)
+    assert cp._relevant({"title": "Rivals", "url": "https://multiversecomputing.com/x"}, cat)

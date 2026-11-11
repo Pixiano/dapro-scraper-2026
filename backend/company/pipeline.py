@@ -5,6 +5,7 @@ import re
 import time
 from datetime import date
 
+from .. import company as pkg
 from ..config import BASE_DIR
 from . import collect, competitors, report, visual, wikidata
 
@@ -13,7 +14,8 @@ OUT = BASE_DIR / "data" / "company"
 
 def run(name: str, url: str | None = None, categories: int = 5, per_category: int = 3,
         top: int = 10, names: list[str] | None = None, social: bool = False,
-        vision: bool = True) -> dict:
+        vision: bool = True, fresh: bool = False) -> dict:
+    pkg.FRESH = fresh  # ponytail: module flag; fine while runs are one at a time (web: 1 worker)
     t0 = time.perf_counter()
     company = wikidata.resolve(name, top=categories, url=url)
     if not company["links"]["website"]:

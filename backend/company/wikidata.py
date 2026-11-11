@@ -12,7 +12,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
-from . import UA
+from . import UA, cached
 
 API = "https://www.wikidata.org/w/api.php"
 PAGEVIEWS = ("https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/"
@@ -32,14 +32,10 @@ SOCIAL = {"P2397", "P2003", "P2013"}
 MAX_CANDIDATES = 60
 
 
-_cache: dict[str, dict] = {}  # per process = per CLI run
-
-
 def _get(url: str, errors: list[str], **params) -> dict:
-    key = url + json.dumps(params, sort_keys=True)
-    if key not in _cache:
-        _cache[key] = _fetch(url, errors, params)
-    return _cache[key]
+    # 30-day cache: entities and monthly pageviews barely move; --fresh bypasses
+    return cached("wd:" + url + json.dumps(params, sort_keys=True), "static",
+                  lambda: _fetch(url, errors, params))
 
 
 def _fetch(url: str, errors: list[str], params: dict) -> dict:
@@ -59,16 +55,35 @@ COMPANY = re.compile(r"\b(company|corporation|conglomerate|organi[sz]ation|enter
                      r"firm|manufacturer|developer|publisher|studio|brand|startup)\b", re.I)
 
 
-def search(name: str, errors: list[str], prefer_company: bool = True) -> str | None:
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+
+
+def search(name: str, errors: list[str], prefer_company: bool = True,
+           exact: bool = False) -> str | None:
     """Top hit; by default prefer one described as a company ("Netflix" the
-    service ranks above Netflix the media company)."""
+    service ranks above Netflix the media company). exact: only hits whose
+    matched label/alias equals the name ("Teams Worth It" must not -> a film)."""
     data = _get(API, errors, action="wbsearchentities", search=name,
                 language="en", type="item", limit=5, format="json")
-    hits = data.get("search") or []
+    hits = [h for h in data.get("search") or [] if not exact
+            or _norm((h.get("match") or {}).get("text") or "") == _norm(name)]
     for h in hits if prefer_company else []:
         if COMPANY.search(h.get("description") or ""):
             return h["id"]
     return hits[0]["id"] if hits else None
+
+
+def by_website(url: str, errors: list[str]) -> str | None:
+    """Item whose official website (P856) is this host: pins "Gemini" + gemini.com
+    to the exchange, not the constellation. ponytail: 4 spelling variants only."""
+    h = urlparse(url if "//" in url else "https://" + url).netloc.lower().removeprefix("www.")
+    for u in (f"https://www.{h}", f"https://{h}", f"https://www.{h}/", f"https://{h}/"):
+        data = _get(API, errors, action="query", list="search", srlimit=1, format="json",
+                    srsearch=f"haswbstatement:P856={u}")
+        if hits := (data.get("query") or {}).get("search"):
+            return hits[0]["title"]
+    return None
 
 
 def get_entities(ids: list[str], errors: list[str]) -> dict[str, dict]:
@@ -178,10 +193,11 @@ def resolve(name: str, top: int = 5, today: date | None = None,
                  "links": {**{k: None for k, _ in LINKS.values()}, "website": url},
                  "categories": [], "own_entities": [], "own_names": [base_name(name)],
                  "own_labels": [], "errors": errors}
-    qid = search(name, errors)
+    qid = (by_website(url, errors) if url else None) or search(name, errors)
     ent = get_entities([qid], errors).get(qid) if qid else None
     site = (claim_values(ent, "P856") or [None])[0] if ent else None
-    if ent and url and site and _host(site) != _host(url):
+    # pinned: an item with no website can't be confirmed (Gemini the constellation)
+    if ent and url and _host(site) != _host(url):
         errors.append(f"wikidata: {qid} website {site} != {url}; treated as not on Wikidata")
         ent = None
     if not ent:
@@ -222,6 +238,16 @@ def resolve(name: str, top: int = 5, today: date | None = None,
         cats.append({"qid": q, "label": label(e), "enwiki": enwiki(e),
                      "pageviews": views.get(q, 0)})
     cats.sort(key=lambda c: -c["pageviews"])
+    if not cats:  # Spotify Technology lists no products: the "Spotify" service item is the category
+        q2 = search(name, errors, prefer_company=False)
+        e2 = get_entities([q2], errors).get(q2) if q2 and q2 != qid else None
+        # only if it is provably theirs: made/owned by them, or the same website
+        mine = e2 and (qid in {v for p in ("P127", "P176", "P178", "P749")
+                               for v in claim_values(e2, p)}
+                       or _host((claim_values(e2, "P856") or [""])[0]) == _host(site) != "")
+        if q2 and e2 and mine and enwiki(e2) and not is_generic(e2):
+            cand_ents[q2] = e2  # -> own_entities / own_labels too
+            cats = [{"qid": q2, "label": label(e2), "enwiki": enwiki(e2), "pageviews": 0}]
 
     ref_ids = claim_values(ent, "P159")[:1] + claim_values(ent, "P452")[:3]
     refs = get_entities(ref_ids, errors) if ref_ids else {}

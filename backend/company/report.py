@@ -28,13 +28,24 @@ CAPPED = {"blog", "medium"}
 TOP = 6  # items listed per quarter per entity
 
 
+# Also the Gemini exchange, people named Claude, the animal, GitHub's non-AI news...
+AMBIG = {"gemini", "claude", "llama", "grok", "copilot", "inference"}
+_A = r"(?:gemini|claude|llama|grok|copilot)"
+AMBIG_CTX = re.compile(
+    rf"(?i:(?:google|anthropic|meta|xai|microsoft|github)(?:['’]s)?\W+{_A}(?![\w])"
+    rf"|(?<![\w]){_A}\W+(?:\d|(?:pro|flash|ultra|nano|opus|sonnet|haiku|code|advanced)(?![\w])))")
+
+
 def ai_terms(title: str, *names: str | None) -> list[str]:
     """Names (search name, label) are removed first, with a trailing "AI":
-    a competitor found as "Mistral" still strips "Mistral AI".
-    ponytail: "Gemini"/"Claude" also match the exchange / people; keyword list ceiling"""
+    a competitor found as "Mistral" still strips "Mistral AI". Ambiguous terms
+    count only with a non-ambiguous AI term or in model context (AMBIG_CTX).
+    ponytail: context list; a bare "Gemini tops charts" is missed"""
+    ctx = AMBIG_CTX.search(title)  # before stripping: "Google Gemini" for Google itself
     for n in filter(None, names):
         title = re.sub(rf"(?<![\w]){re.escape(n)}(?:\s+AI)?(?![\w])", " ", title, flags=re.I)
-    return [m.lower() for m in AI.findall(title)]
+    terms = [m.lower() for m in AI.findall(title)]
+    return terms if ctx or set(terms) - AMBIG else []
 
 
 def capped(i: dict) -> bool:
@@ -143,11 +154,14 @@ def build(raw: dict, out_dir: Path) -> dict:
           "model output is the labelled 'Vision notes' per company",
           "## How to read this",
           "- **AI item**: a headline/post whose title matches the AI keyword list (word "
-          "boundary; the entity's own name is removed first, so 'Mistral AI' alone is not AI).",
+          "boundary; the entity's own name is removed first, so 'Mistral AI' alone is not AI). "
+          "Ambiguous terms (Gemini, Claude, Llama, Grok, Copilot, inference) count only "
+          "next to another AI term or in model context ('Google Gemini', 'Claude 4').",
           "- **Item confidence**: high = first-party (own blog, Medium, YouTube); "
           "medium = third party naming the entity in the title (Hacker News, Google News).",
           "- **Competitor confidence**: distinct web domains naming it as a competitor "
-          "(3+ high, 2 medium); names not on Wikidata drop one level.",
+          "(3+ high, 2 medium); names not on Wikidata, or whose Wikidata class differs "
+          "from the category's, drop one level. Products with the same owner are merged.",
           f"- **Outlook for {nxt}**: straight-line run-rate of the quarter so far vs "
           f"{last} (more than 20% change = up/down), counting only sources with full "
           "history (blog/Medium feeds and YouTube RSS return just the latest posts). "
@@ -159,6 +173,10 @@ def build(raw: dict, out_dir: Path) -> dict:
           "and lists the AI products visible on it. Model output, **unverified**: check "
           "against the screenshot; never used in any count, confidence or outlook.",
           "## Summary"]
+    if len(ents) == 1:  # say it, rather than pad the list with weak matches
+        md.append("- **No competitor reached medium confidence** in live search (too little "
+                  "coverage, or a name shared with something else). Low-confidence names, if "
+                  "any, are in the appendix; name them yourself with `--competitors`.")
     for e, m, a in zip(ents, metas, an):
         o = a["outlook"]
         role = "the company" if m is company else f"{m.get('confidence', '?')} confidence"
@@ -174,7 +192,11 @@ def build(raw: dict, out_dir: Path) -> dict:
         if n:
             why = ", ".join(m.get("categories") or []) or "named by you (--competitors)"
             md.append(f"- **Competes in**: {_t(why)} · confidence: {m.get('confidence')} · "
-                      f"{len(m.get('domains') or [])} domains")
+                      f"{len(m.get('domains') or [])} domains"
+                      + (" · different Wikidata class from the category (-1 level)"
+                         if m.get("off_class") else "")
+                      + (f" · same owner, merged: {_t(', '.join(m['also']))}"
+                         if m.get("also") else ""))
             for x in [x for x in (m.get("evidence") or []) if x["url"] in alive][:3]:
                 md.append(f"- Evidence: [{_t(x['title'])}]({x['url']}) "
                           f"({_st(x['url'], checks)}, via {x['engine']})")
