@@ -3,7 +3,7 @@ No LLM: every number is a count, every inference a stated rule."""
 
 import re
 from collections import Counter
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from ..pdf import render_markdown_pdf
@@ -114,6 +114,19 @@ def _t(s: str) -> str:
     return re.sub(r"[\[\]*`]", "", s or "").strip()  # keep the PDF markup intact
 
 
+def _d(iso: str | date | None) -> str:
+    """'2026-09-17' -> '17 Sep 2026'; '2026-11-12T09:02:22+00:00' -> '12 Nov 2026, 09:02 UTC'."""
+    if not iso:
+        return "-"
+    s = str(iso)
+    try:
+        d = datetime.fromisoformat(s)
+    except ValueError:
+        return s
+    day = f"{d.day} {d:%b %Y}"
+    return f"{day}, {d:%H:%M} UTC" if "T" in s else day
+
+
 def _st(url: str, checks: dict) -> str:
     c = checks.get(url) or {}
     code = f" {c['code']}" if c.get("code") and c.get("status") != "live" else ""
@@ -167,7 +180,7 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
         refs = cite(i["url"], _t(i["title"]), SRC[i["source"]])
         if i.get("link") in alive:
             refs += cite(i["link"], _t(i["title"]), "linked article")
-        return (f"- {i['published']} · {_t(i['title'])} · *{SRC[i['source']]}{pts}, "
+        return (f"- {_d(i['published'])} · {_t(i['title'])} · *{SRC[i['source']]}{pts}, "
                 f"confidence {i['confidence']}* {refs}")
 
     rows = list(zip(ents, metas, an, picks))
@@ -208,7 +221,7 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
             + f"\nAI items {last}: {a['counts'][last]}; {cur}: {a['counts'][cur]}; "
             f"outlook rule for {nxt}: {o['trend']}, run-rate ~{o['projection']} "
             f"({o['confidence']} confidence); focus rule: {focus(a, last, cur)}\nHeadlines:\n"
-            + "\n".join(f"[{srcs[i['url']][0]}] {i['published']} {SRC[i['source']]}: "
+            + "\n".join(f"[{srcs[i['url']][0]}] {_d(i['published'])} {SRC[i['source']]}: "
                         f"{_t(i['title'])}" for i in did_last + so_far))
 
     ana: dict = {}
@@ -216,7 +229,7 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
         from . import analysis
         ana = analysis.run("\n\n".join(facts), [e["label"] for e in ents],
                            {n: title for n, title, _ in srcs.values()}, company=company["label"],
-                           today=str(today), last=last, cur=cur, nxt=nxt)
+                           today=_d(today), last=last, cur=cur, nxt=nxt)
         # audit trail: the model's reply as given, before the code checks
         (out_dir / "analysis_raw.txt").write_text(ana.get("raw") or "", encoding="utf-8")
     good = bool(ana) and not ana.get("error")
@@ -224,7 +237,7 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
            "sentence cites its sources and was checked by code for citations and numbers.*")
 
     md = [f"# AI competitor report: {_t(company['label'])}",
-          f"Generated {today} · what each competitor did in AI in {last} and so far in "
+          f"Generated {_d(today)} · what each competitor did in AI in {last} and so far in "
           f"{cur}, and an outlook for {nxt}. Sources and method at the end."]
     if good and ana["summary"]:
         md += ["## Summary (analysis)", tag, prose(ana["summary"])]
@@ -329,7 +342,7 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
           f"{last} (more than 20% change = up/down), counting only sources with full "
           "history (blog/Medium feeds and YouTube RSS return just the latest posts). "
           "A stated rule, **not a forecast**.",
-          f"- **Links** were fetched live at {next(iter(checks.values()), {}).get('checked_at', '-')}: "
+          f"- **Links** were fetched live at {_d(next(iter(checks.values()), {}).get('checked_at'))}: "
           "live, unverified (bot wall, rate limit, timeout or server error) or dead "
           "(404/410/no connection, removed from this report).",
           "- **Vision notes**: a local vision model reads a screenshot of each homepage "
@@ -378,7 +391,7 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
         for e, v in vis:
             md.append(f"### {_t(e['label'])}: {v.get('url') or '-'}")
             if v.get("text"):
-                md.append(f"*Read from a homepage screenshot at {v['at']}; "
+                md.append(f"*Read from a homepage screenshot at {_d(v['at'])}; "
                           f"saved as screenshots/{Path(v['screenshot']).name}.*")
                 md += [("- " + _t(ln.strip().lstrip("-•* "))) for ln in v["text"].splitlines()
                        if visual.keep(ln)][:15]
