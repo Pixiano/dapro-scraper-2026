@@ -350,6 +350,7 @@ def test_outlook_scales_by_headline_volume():
     o = outlook(41, 48, 104, 107, q, day)
     assert o["elapsed_days"] == 46 and o["quarter_days"] == 92
     assert o["projection"] == 47 and o["trend"] == "flat"
+    assert (o["share_cur"], o["share_last"]) == (45, 39)  # what the report prints
     assert outlook(10, 20, 100, 100, q, day)["trend"] == "up"
     assert outlook(10, 4, 100, 100, q, day)["trend"] == "down"
     assert outlook(0, 3, 0, 9, q, day)["trend"] == "new"  # no last quarter to scale to
@@ -392,6 +393,24 @@ def test_rules_from_the_scenario_runs(monkeypatch):
         assert ai_terms(t, "Gemini") == [], t
     assert ai_terms("Gemini exchange launches an AI trading agent", "Gemini") == ["ai"]
     assert ai_terms("Google Launches Gemini 4 Carbon", "Google") == ["gemini"]  # Google's own
+
+
+def test_rival_lookup_prefers_a_business_and_low_names_add_up(monkeypatch):
+    # a rival named "Apple" is the company, not the fruit that Wikidata lists first
+    monkeypatch.setattr(wd, "_get", lambda url, e, **p: {"search": [
+        {"id": "QF", "description": "fruit of the apple tree", "match": {"text": "apple"}},
+        {"id": "QA", "description": "American technology company", "match": {"text": "Apple"}}]})
+    assert wd.search("Apple", [], business=True, exact=True) == "QA"
+    assert wd.search("Apple", [], prefer_company=False, exact=True) == "QF"
+    # one site in each of two categories is two sites: low + low -> medium overall
+    one = lambda d: {"qid": "QM", "label": "Microsoft", "on_wikidata": True,  # noqa: E731
+                     "domains": [d], "confidence": "low"}
+    got = cp.overall([{"category": "Search", "competitors": [], "appendix": [one("a.com")]},
+                      {"category": "Acme", "competitors": [], "appendix": [one("b.com")]},
+                      {"category": "Mail", "competitors": [], "appendix": [
+                          {**one("c.com"), "qid": "QX", "label": "Solo"}]}], 10)
+    assert [(a["label"], a["confidence"], a["categories"]) for a in got] == [
+        ("Microsoft", "medium", ["Search", "Acme"])]
 
 
 def test_top_round_robin():

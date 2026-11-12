@@ -56,6 +56,10 @@ def _fetch(url: str, errors: list[str], params: dict) -> dict:
 # fell through to "Deloitte Netherlands" (described as "company")
 COMPANY = re.compile(r"\b(company|corporation|conglomerate|organi[sz]ation|enterprise|network|"
                      r"firm|manufacturer|developer|publisher|studio|brand|startup)\b", re.I)
+# ponytail: word list for "this is a company or something a company sells"
+BUSINESS = re.compile(COMPANY.pattern[:-3] + r"|software|app|application|chatbot|service|"
+                      r"platform|website|search engine|operating system|marketplace|"
+                      r"retailer|provider)\b", re.I)
 
 
 def _norm(s: str) -> str:
@@ -63,16 +67,19 @@ def _norm(s: str) -> str:
 
 
 def search(name: str, errors: list[str], prefer_company: bool = True,
-           exact: bool = False) -> str | None:
+           exact: bool = False, business: bool = False) -> str | None:
     """Top hit; by default prefer one described as a company ("Netflix" the
     service ranks above Netflix the media company). exact: only hits whose
-    matched label/alias equals the name ("Teams Worth It" must not -> a film)."""
+    matched label/alias equals the name ("Teams Worth It" must not -> a film).
+    business: prefer the first hit described as a company or a product, so a
+    rival named "Apple" is the company and "Netflix" stays the service."""
     data = _get(API, errors, action="wbsearchentities", search=name,
                 language="en", type="item", limit=5, format="json")
     hits = [h for h in data.get("search") or [] if not exact
             or _norm((h.get("match") or {}).get("text") or "") == _norm(name)]
-    for h in hits if prefer_company else []:
-        if COMPANY.search(h.get("description") or ""):
+    pat = BUSINESS if business else COMPANY if prefer_company else None
+    for h in hits if pat else []:
+        if pat and pat.search(h.get("description") or ""):
             return h["id"]
     return hits[0]["id"] if hits else None
 
@@ -172,7 +179,7 @@ def is_business(ent: dict) -> bool:
     developer, stock listing). ponytail: heuristic; extend COMPANY when a real
     rival is turned away."""
     desc = (ent.get("descriptions") or {}).get("en", {}).get("value") or ""
-    return bool(COMPANY.search(desc)) or any(
+    return bool(BUSINESS.search(desc)) or any(
         claim_values(ent, p) for p in ("P452", "P1056", "P176", "P178", "P414"))
 
 

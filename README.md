@@ -190,7 +190,7 @@ Or in the browser: start the server (see Setup) and open `http://localhost:8123/
 | Step | Source | Output |
 |---|---|---|
 | Resolve | Wikidata + Wikipedia pageviews | official links, product/subsidiary categories (Alphabet → Google, YouTube, Maps…) |
-| Competitors | Brave Search API + DuckDuckGo, merged, every name checked on Wikidata | per category; confidence = distinct domains naming it (3+ high, 2 medium), one level lower if not on Wikidata or in a different Wikidata class from the category; same-owner products merged (Prime Video + Amazon Prime) |
+| Competitors | Brave Search API + DuckDuckGo, merged, every name checked on Wikidata | per category; confidence = distinct domains naming it (3+ high, 2 medium), low if Wikidata does not list the name as a company, brand or product, one level lower in a different Wikidata class from the category; a product is listed under its maker (ChatGPT -> OpenAI, shown as 'via'); the company itself is always searched too ('Alphabet competitors'); same-owner products merged (Prime Video + Amazon Prime) |
 | Collect | Hacker News, Google News (monthly), official blog / Medium feeds, YouTube | items bucketed into last two quarters + this quarter to date |
 | Report | live link check, AI keyword filter | `data/company/<name>/<date>/report.pdf`, `report.md`, `raw.json` |
 
@@ -200,7 +200,7 @@ Or in the browser: start the server (see Setup) and open `http://localhost:8123/
 - **`--social`** (off by default) reads the follower/post numbers that Instagram and Facebook show on the public profile page. One request per profile, no login, no posts; shown per entity, never in the quarter counts.
 - **Links** are fetched live: *live*, *unverified* (paywall/bot wall/timeout), or *dead* (404/410/no connection, removed).
 - **AI filter**: keyword list on titles. Ambiguous words (Gemini, Claude, Llama, Grok, Copilot, inference) count only next to another AI term or in model context ("Google Gemini", "Claude 4"), so the Gemini exchange and Claude Monet stay out.
-- **Outlook** = this quarter's run-rate vs last quarter (±20% = up/down). A stated rule, not a forecast.
+- **Outlook** = AI's share of the company's headlines this quarter so far vs last quarter (±20% = up/down). A share, not a per-day count: news search returns more recent headlines than old ones, which made a per-day count say 'up' for nearly everyone. A stated rule, not a forecast.
 - **Keys (optional, in `.env`)**: `BRAVE_API_KEY` adds Brave to search; `YOUTUBE_API_KEY` gets full upload history (otherwise RSS, latest 15); `CONTACT_URL` is required by Wikimedia's API rules and is sent only to Wikimedia.
 - **Cache**: web search results are kept 24 h and Wikidata 30 days in `data/app.db`, so a repeat run skips resolve + search (seconds instead of a minute) and stops tripping DuckDuckGo's throttle. Throttled or errored searches are never cached, and nothing is cached while `BRAVE_API_KEY` is set (Brave's terms forbid storing results). `--fresh` (or the page checkbox) ignores the cache for one run. News, feeds and link checks are always live.
 - **`--url`** pins the company by its website on Wikidata ("Gemini" + gemini.com → the crypto exchange, not the constellation or the Google model). A Wikidata match with no website is not trusted when `--url` is given. If the plain name means something else on Wikidata, the report says so; add `--context <word>` (or the page's *Context word* field) to require that word in news and search: `python -m backend.company "Gemini" --url https://www.gemini.com --context crypto`.

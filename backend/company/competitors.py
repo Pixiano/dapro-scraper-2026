@@ -181,7 +181,8 @@ def _lookup(n: str, errors: list[str]) -> str | None:
     ("ChatGPT Showdown" -> "ChatGPT")."""
     w = n.split()
     for cand in [n] + ([" ".join(w[1:]), " ".join(w[:-1])] if len(w) > 1 else []):
-        if q := wd.search(cand, errors, prefer_company=False, exact=True):
+        # business: "Apple" is the company here, not the fruit (the first hit)
+        if q := wd.search(cand, errors, business=True, exact=True):
             return q
     return None
 
@@ -357,10 +358,12 @@ def for_category(cat: dict, own: set[str], own_names: list[str], per_category: i
 
 
 def overall(per_cat: list[dict], top: int) -> list[dict]:
-    """Dedupe across categories; rank by categories competed in, then domains."""
+    """Dedupe across categories; rank by categories competed in, then domains.
+    Low-confidence names count too: one site in each of two categories is two
+    sites naming the same rival (Microsoft via Bing, and as a direct rival)."""
     agg: dict[str, dict] = {}
     for c in per_cat:
-        for m in c["competitors"]:
+        for m in c["competitors"] + c.get("appendix", []):
             a = agg.setdefault(m["qid"], {**m, "categories": [], "domains": []})
             a["categories"].append(c["category"])
             a["domains"] = sorted(set(a["domains"]) | set(m["domains"]))
@@ -372,7 +375,7 @@ def overall(per_cat: list[dict], top: int) -> list[dict]:
     for a in ranked:
         conf = confidence(len(a["domains"])) if a.get("on_wikidata", True) else "low"
         a["confidence"] = _down(conf) if a.get("off_class") else conf
-    return ranked[:top]
+    return [a for a in ranked if a["confidence"] != "low"][:top]
 
 
 def from_names(names: list[str], errors: list[str]) -> list[dict]:

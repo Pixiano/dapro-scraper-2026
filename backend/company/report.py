@@ -83,7 +83,14 @@ def outlook(last: int, to_date: int, last_all: int, cur_all: int,
     trend = ("new" if proj else "none") if last == 0 else \
         "up" if proj > last * 1.2 else "down" if proj < last * .8 else "flat"
     return {"projection": proj, "trend": trend, "confidence": conf,
+            "share_last": round(100 * last / last_all) if last_all else 0,
+            "share_cur": round(100 * to_date / cur_all) if cur_all else 0,
             "elapsed_days": elapsed, "quarter_days": total}
+
+
+def _share(o: dict) -> str:
+    """What the trend is read from: '26% of headlines, was 40%'."""
+    return f"{o['share_cur']}% of headlines, was {o['share_last']}%"
 
 
 def analyse(e: dict, labels: list[str], cur_start: date, today: date) -> dict:
@@ -203,8 +210,10 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
         urls += [v for v in (e.get("links") or {}).values() if v]
         urls += [x["url"] for x in (m.get("evidence") or [])[:3]]
         urls += [i[k] for its in p.values() for i in its for k in ("url", "link") if i.get(k)]
-    low = [x for c in raw["competitors"].get("per_category") or [] for x in c["appendix"]
-           if x.get("evidence")]
+    # once each, and not the ones that made the main list through another category
+    main = {m.get("qid") for m in raw["competitors"]["overall"]}
+    low = list({x["qid"]: x for c in raw["competitors"].get("per_category") or []
+                for x in c["appendix"] if x.get("evidence") and x["qid"] not in main}.values())
     urls += [x["evidence"][0]["url"] for x in low]
     checks = linkcheck.check_all(urls)
     alive = {u for u, c in checks.items() if c["status"] != "dead"}
@@ -268,8 +277,10 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
         for q, its in ((last, did_last), (cur, so_far)):
             if its:
                 body += [f"~ # {q}"] + [did(i) for i in sorted(its, key=lambda i: i["published"] or "")]
-        rule = [f"- **Activity (rule)**: {_b(o['trend'])}, ~{o['projection']} AI items at {last}'s "
-                f"headline volume vs {o['last']} in {last} · confidence {_b(o['confidence'])}",
+        rule = [f"- **Activity (rule)**: {_b(o['trend'])}: AI is {o['share_cur']}% of its "
+                f"headlines so far this quarter ({o['to_date']} of {o['cur_all']}), "
+                f"{o['share_last']}% in {last} ({o['last']} of {o['last_all']}) · "
+                f"confidence {_b(o['confidence'])}",
                 f"- **Likely focus (rule)**: {focus(a, last, cur)}"]
         secs.append((head, body, rule))
         role = "COMPANY (the subject)" if n == 0 else f"COMPETITOR {n}"
@@ -278,8 +289,8 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
             + (f"; competes in: {', '.join(cats) or 'named by the user'}; competitor "
                f"confidence: {m.get('confidence')}" if n else "")
             + f"\nAI items {last}: {a['counts'][last]}; {cur}: {a['counts'][cur]}; "
-            f"outlook rule for {nxt}: {o['trend']}, ~{o['projection']} at {last}'s headline "
-            f"volume ({o['confidence']} confidence); focus rule: {focus(a, last, cur)}\nHeadlines:\n"
+            f"outlook rule for {nxt}: {o['trend']}, AI is {_share(o)} in {last} "
+            f"({o['confidence']} confidence); focus rule: {focus(a, last, cur)}\nHeadlines:\n"
             + "\n".join(f"[{srcs[i['url']][0]}] {_d(i['published'])} {SRC[i['source']]}: "
                         f"{_t(i['title'])}" for i in did_last + so_far))
 
@@ -333,15 +344,16 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
         busiest = max(rows[1:], key=lambda r: r[2]["counts"][last])
         md.append(f"- **Most AI news in {last}**: {_t(busiest[0]['label'])} "
                   f"({busiest[2]['counts'][last]} AI items).")
-    for word in ("up", "down", "new"):
+    for word, says in (("up", "AI's share of headlines is rising"),
+                       ("down", "AI's share of headlines is falling"),
+                       ("new", "First AI headlines this quarter")):
         xs = [_t(e["label"]) for e, _, a, _ in rows if a["outlook"]["trend"] == word]
-        if xs:
-            md.append(f"- **AI activity {word} into {nxt}** (share-of-headlines rule): "
-                      + ", ".join(xs).rstrip(".") + ".")  # "Alphabet Inc." ends the list
+        if xs:  # rstrip: "Alphabet Inc." ends the list
+            md.append(f"- **{says}** ({cur} vs {last}): " + ", ".join(xs).rstrip(".") + ".")
 
     md.append("## Scorecard")
     md.append(f"| # | Company | Competes in | Confidence | AI items {last} | {cur} | "
-              f"{nxt} outlook |")
+              "AI share of headlines |")
     md.append("|---|---|---|---|---|---|---|")
     for n, (e, m, a, _) in enumerate(rows):
         o = a["outlook"]
@@ -352,7 +364,8 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
         md.append(f"| {n or '-'} | {_t(e['label'])} | {where} | "
                   f"{_b(m['confidence']) if n and m.get('confidence') in TAGS else '-'} | "
                   f"{a['counts'][last]} | {a['counts'][cur]} | "
-                  f"{_b(o['trend'])} ~{o['projection']} ({_b(o['confidence'])}) |")
+                  f"{_b(o['trend'])} {o['share_cur']}%, was {o['share_last']}% "
+                  f"({_b(o['confidence'])}) |")
     if good and ana["compare"]:
         md += [f"### {_t(company['label'])} vs its competitors (analysis)",
                "> " + prose(ana["compare"])]
@@ -369,9 +382,10 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
                             for x in m.get("evidence") or []):
         cav.append("Competitors were found with DuckDuckGo alone, which returns few results; "
                    "adding a Brave Search key usually finds more.")
-    cav.append("The outlook counts headlines, not deals or revenue: a busy news quarter means "
-               f"more AI coverage, not necessarily more AI work. The {nxt} figure scales the "
-               f"quarter so far to {last}'s headline volume; it is not a forecast.")
+    cav.append("The trend compares AI's share of each company's headlines in the quarter so far "
+               f"with {last}. It counts headlines, not deals or revenue, so a quarter with a lot "
+               "of other news (a big contract, a lawsuit) lowers the AI share without any less "
+               "AI work. It is not a forecast.")
     cav.append("Google News is dominated by press releases and finance sites, and company "
                "blogs and YouTube feeds only return their latest posts.")
     if use_model and good:
@@ -418,12 +432,12 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
           "product stays low; a different Wikidata class from the category's drops one "
           "level. A product is listed under the company that makes it ('via ChatGPT'); "
           "products with the same owner are merged.",
-          f"- **Outlook for {nxt}**: AI headlines so far this quarter, scaled to {last}'s "
-          f"total headline count, vs AI headlines in {last} (more than 20% change = "
-          "up/down). In other words: has AI's share of the company's headlines moved? "
-          "Scaled by headline volume, not by days, because news search returns more recent "
-          "headlines than old ones. Only sources with full history are counted (blog/Medium "
-          "feeds and YouTube RSS return just the latest posts). A stated rule, **not a forecast**.",
+          f"- **Outlook for {nxt}**: AI's share of the company's headlines so far this "
+          f"quarter vs its share in {last} (more than 20% change = up/down). A share, not "
+          "a count per day, because news search returns more recent headlines than old "
+          "ones, which made a per-day count rise for nearly every company. Only sources "
+          "with full history are counted (blog/Medium feeds and YouTube RSS return just "
+          "the latest posts). A stated rule, **not a forecast**.",
           f"- **Links** were fetched live at {_d(next(iter(checks.values()), {}).get('checked_at'))}: "
           "live, unverified (bot wall, rate limit, timeout or server error) or dead "
           "(404/410/no connection, removed from this report).",
@@ -454,9 +468,9 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
             md.append("- **AI terms, all quarters**: "
                       + ", ".join(f"{t} ({c})" for t, c in a["themes"]))
         o = a["outlook"]
-        md.append(f"- **Outlook working**: {o['to_date']} AI items in {o['cur_all']} headlines "
-                  f"so far (day {o['elapsed_days']} of {o['quarter_days']}), scaled to "
-                  f"{o['last_all']} headlines in {last} -> ~{o['projection']} vs {o['last']}")
+        md.append(f"- **Outlook working**: {o['to_date']} AI of {o['cur_all']} headlines so far "
+                  f"(day {o['elapsed_days']} of {o['quarter_days']}) vs {o['last']} of "
+                  f"{o['last_all']} in {last}, full-history sources only")
         if e.get("social"):  # --social: profile-level, never in the counts
             md.append("- **Social profiles** (public page summary, not in counts): " + " · ".join(
                 f"[{k}]({s['url']}): " + (", ".join(f"{v} {f.replace('_', ' ')}"
