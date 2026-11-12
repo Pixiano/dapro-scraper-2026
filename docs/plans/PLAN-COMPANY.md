@@ -1,5 +1,10 @@
 # Plan — Company competitor mechanism
 
+> **Historical plan.** The mechanism was built from this, then grew: it now also has optional
+> local-model vision notes and analysis paragraphs (so "No LLM anywhere" below is out of date),
+> and the outlook became a share of headlines. The current behaviour is described in
+> [../company-reports.md](../company-reports.md).
+
 A second mechanism, separate from the creator/YouTuber one. CLI first:
 
 ```

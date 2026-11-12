@@ -1,7 +1,7 @@
 """Vision stage: turn each artifact's screenshots and images into text notes.
 
 Runs on the local Qwen3.5-9B vision model (chosen over gemma-4-12B on a real
-screenshot bench — see PLAN-V2-AGGREGATOR.md §8). The model loads once for the
+screenshot bench — see docs/plans/PLAN-V2-AGGREGATOR.md §8). The model loads once for the
 whole stage and is swapped out automatically when synthesis needs the text model.
 
 Prompts explicitly forbid guessing: a fabricated view count or name would be
