@@ -67,7 +67,8 @@ def domain(url: str) -> str:
 
 def web_search(query: str, errors: list[str]) -> list[dict]:
     """Brave + ddgs merged, deduped by URL, ads dropped. Cached 24 h, but only
-    when no engine errored (a throttled half-result must be retried)."""
+    when no engine errored (a throttled half-result must be retried) and Brave is
+    off: Brave's ToS §3(b) forbids storing results beyond transient use."""
     n = len(errors)
 
     def run() -> list[dict]:
@@ -82,7 +83,7 @@ def web_search(query: str, errors: list[str]) -> list[dict]:
         return out
     # key includes whether Brave is on: adding a key must not serve ddgs-only results
     return cached(f"search:{bool(settings.brave_api_key)}:{query}", "list", run,
-                  ok=lambda v: bool(v) and len(errors) == n)
+                  ok=lambda v: bool(v) and len(errors) == n and not settings.brave_api_key)
 
 
 # Headline Title Case filler around "X vs Y" ("The Gemini vs ChatGPT Showdown").

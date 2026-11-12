@@ -500,6 +500,11 @@ def test_search_cache_skips_errors_and_fresh(monkeypatch):
     cp.web_search("t", [])
     cp.web_search("t", [])
     assert calls.count("t") == 2  # errored half-results are never cached
+    monkeypatch.setattr(cp, "_ddg", ok)
+    monkeypatch.setattr(cp.settings, "brave_api_key", "k")
+    cp.web_search("b", [])
+    cp.web_search("b", [])
+    assert calls.count("b") == 2  # Brave on: results never stored (Brave ToS)
 
 
 def test_title_case_junk_trimmed_and_exact_wikidata(monkeypatch):
