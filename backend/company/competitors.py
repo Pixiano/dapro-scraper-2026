@@ -4,6 +4,7 @@
 Confidence = distinct domains whose result titles name the competitor:
 >=3 high, 2 medium, 1 low (low -> appendix, not the main list)."""
 
+import html
 import re
 import time
 from urllib.parse import urlparse
@@ -37,8 +38,10 @@ def _brave(query: str, errors: list[str]) -> list[dict]:
                       headers={"X-Subscription-Token": settings.brave_api_key,
                                "Accept": "application/json"})
         r.raise_for_status()
-        return [{"title": x.get("title", ""), "url": x.get("url", ""),
-                 "snippet": x.get("description", ""), "engine": "brave"}
+        # Brave marks the matched words: "<strong>Accenture</strong> vs Capgemini"
+        text = lambda s: html.unescape(re.sub(r"<[^>]+>", "", s or ""))  # noqa: E731
+        return [{"title": text(x.get("title")), "url": x.get("url", ""),
+                 "snippet": text(x.get("description")), "engine": "brave"}
                 for x in (r.json().get("web") or {}).get("results") or []]
     except Exception as exc:
         errors.append(f"brave: {type(exc).__name__}: {exc}")

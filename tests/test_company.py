@@ -395,6 +395,20 @@ def test_rules_from_the_scenario_runs(monkeypatch):
     assert ai_terms("Google Launches Gemini 4 Carbon", "Google") == ["gemini"]  # Google's own
 
 
+def test_brave_titles_lose_their_highlight_tags(monkeypatch):
+    class R:
+        def raise_for_status(self): pass
+
+        def json(self):
+            return {"web": {"results": [{"title": "<strong>Accenture</strong> vs Capgemini &amp; Co",
+                                         "url": "https://x.com/1", "description": "<b>a</b>"}]}}
+    monkeypatch.setattr(cp.settings, "brave_api_key", "k")
+    monkeypatch.setattr(cp.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cp.httpx, "get", lambda *a, **k: R())
+    assert cp._brave("q", []) == [{"title": "Accenture vs Capgemini & Co", "url": "https://x.com/1",
+                                   "snippet": "a", "engine": "brave"}]
+
+
 def test_rival_lookup_prefers_a_business_and_low_names_add_up(monkeypatch):
     # a rival named "Apple" is the company, not the fruit that Wikidata lists first
     monkeypatch.setattr(wd, "_get", lambda url, e, **p: {"search": [
@@ -593,6 +607,7 @@ def test_vision_line_filter():
 def test_search_cache_skips_errors_and_fresh(monkeypatch):
     import backend.company as pkg
     calls = []
+    monkeypatch.setattr(cp.settings, "brave_api_key", "")  # a real key in .env turns the cache off
 
     def ok(q, e):
         calls.append(q)
