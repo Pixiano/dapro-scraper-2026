@@ -415,7 +415,7 @@ def test_build_report_pdf(tmp_path, monkeypatch):
     monkeypatch.setattr(client, "complete", lambda *a, **k: "```json\n" + reply + "\n```")
     report.build(raw, tmp_path, use_model=True)
     md = (tmp_path / "report.md").read_text(encoding="utf-8")
-    assert "Rival ships LLMs. *(medium)* [1]" in md and "More LLM news." in md
+    assert "Rival ships LLMs. {{medium}} [1]" in md and "More LLM news." in md
     assert "$5B" not in md and "Acme trails" not in md  # invented number, fake citation
     assert "4 sentences failed and were removed" in md  # main call + top-up for Acme
     assert md.index("## Summary (analysis)") < md.index("## Scorecard")

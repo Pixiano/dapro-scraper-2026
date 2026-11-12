@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from ..pdf import render_markdown_pdf
+from ..pdf import TAGS, render_markdown_pdf
 from . import linkcheck, visual
 from .analysis import prose
 
@@ -114,6 +114,14 @@ def _t(s: str) -> str:
     return re.sub(r"[\[\]*`]", "", s or "").strip()  # keep the PDF markup intact
 
 
+KIND = {"hacker_news": "hn", "google_news": "news"}  # timeline marks; else first-party
+
+
+def _b(word: str) -> str:
+    """Badge token: the PDF colours {{high}}, {{up}}... (B&W: words + symbols)."""
+    return "{{" + word + "}}"
+
+
 def _ago(days: int) -> str:
     """Recent only: '(today)', '(3 days ago)', '(last week)', '(2 weeks ago)'; older -> ''."""
     if not 0 <= days <= 30:
@@ -157,7 +165,7 @@ def focus(a: dict, last: str, cur: str) -> str:
     return "; ".join(parts) or "too few AI headlines to tell"
 
 
-def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
+def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -> dict:
     """use_model: add the checked local-model analysis (pipeline: on)."""
     col = raw["collected"]
     quarters = col["quarters"]
@@ -194,8 +202,8 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
         refs = cite(i["url"], _t(i["title"]), SRC[i["source"]])
         if i.get("link") in alive:
             refs += cite(i["link"], _t(i["title"]), "linked article")
-        return (f"- {_d(i['published'])} · {_t(i['title'])} · *{SRC[i['source']]}{pts}, "
-                f"confidence {i['confidence']}* {refs}")
+        return (f"- {_d(i['published'])} · {_t(i['title'])} · *{SRC[i['source']]}{pts}* "
+                f"{_b(i['confidence'])} {refs}")
 
     rows = list(zip(ents, metas, an, picks))
     own = {company.get("label"), company.get("search_name")}
@@ -204,11 +212,13 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
         o = a["outlook"]
         cats = ["direct rival" if c in own else c for c in m.get("categories") or []]
         head = [f"## {_t(e['label'])} (the company)" if n == 0 else f"## {n}. {_t(e['label'])}"]
-        if n:
+        if n and not cats:
+            head.append("- **Competes in**: named by you (`--competitors`)")
+        elif n:
             ev = [x for x in (m.get("evidence") or []) if x["url"] in alive][:3]
-            head.append(f"- **Competes in**: {_t(', '.join(cats) or 'named by you (--competitors)')}"
-                        f" · confidence {m.get('confidence')}, named as a competitor on "
-                        f"{len(m.get('domains') or [])} sites "
+            head.append(f"- **Competes in**: {_t(', '.join(cats))}"
+                        f" · confidence {_b(m['confidence']) if m.get('confidence') in TAGS else m.get('confidence')}, "
+                        f"named as a competitor on {len(m.get('domains') or [])} sites "
                         + "".join(cite(x["url"], _t(x["title"][:120]),
                                        f"competitor evidence via {x['engine']}") for x in ev)
                         + (" · different Wikidata class from the category (-1 level)"
@@ -223,8 +233,14 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
         body += [did(i) for i in did_last] or ["- no AI headlines found"]
         if so_far:
             body += [f"### So far in {cur}"] + [did(i) for i in so_far]
-        rule = [f"- **Activity (rule)**: **{o['trend']}**, run-rate ~{o['projection']} AI items "
-                f"vs {o['last']} in {last} (confidence {o['confidence']})",
+        dated = [i for i in did_last + so_far if i.get("published")]
+        if len(dated) > 3:  # a series: show it on a timeline above the lists
+            body[:0] = [f"### Timeline: {last} to today",
+                        f"@@timeline {quarters[1]['start']} {today} | " + ", ".join(
+                            f"{i['published'][:10]}:{srcs[i['url']][0]}:"
+                            f"{KIND.get(i['source'], 'first')}" for i in dated)]
+        rule = [f"- **Activity (rule)**: {_b(o['trend'])}, run-rate ~{o['projection']} AI items "
+                f"vs {o['last']} in {last} · confidence {_b(o['confidence'])}",
                 f"- **Likely focus (rule)**: {focus(a, last, cur)}"]
         secs.append((head, body, rule))
         role = "COMPANY (the subject)" if n == 0 else f"COMPETITOR {n}"
@@ -254,7 +270,7 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
           f"Generated {_d(today)} · what each competitor did in AI in {last} and so far in "
           f"{cur}, and an outlook for {nxt}. Sources and method at the end."]
     if good and ana["summary"]:
-        md += ["## Summary (analysis)", tag, prose(ana["summary"])]
+        md += ["## Summary (analysis)", "> " + tag, "> " + prose(ana["summary"])]
     md += ["## How to use this report",
            "Start with the scorecard to see who is most active in AI and whose activity is "
            f"rising. Each company section then lists what it actually did in {last} (dated "
@@ -294,11 +310,12 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
         cats = ["direct rival" if c in own else c for c in m.get("categories") or []]
         where = "(the company)" if n == 0 else _t(", ".join(cats) or "named by you")
         md.append(f"| {n or '-'} | {_t(e['label'])} | {where} | "
-                  f"{'-' if n == 0 else m.get('confidence', '?')} | {a['counts'][last]} | "
-                  f"{a['counts'][cur]} | {o['trend']}, ~{o['projection']} ({o['confidence']}) |")
+                  f"{_b(m['confidence']) if n and m.get('confidence') in TAGS else '-'} | "
+                  f"{a['counts'][last]} | {a['counts'][cur]} | "
+                  f"{_b(o['trend'])} ~{o['projection']} ({_b(o['confidence'])}) |")
     if good and ana["compare"]:
         md += [f"### {_t(company['label'])} vs its competitors (analysis)",
-               prose(ana["compare"])]
+               "> " + prose(ana["compare"])]
 
     # caveats: facts the code knows, written as sentences (not model output)
     cav = []
@@ -332,16 +349,16 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
     elif use_model:
         cav.append(f"The local model analysis was unavailable this run "
                    f"({_t(ana.get('error') or '')}), so only rule-based outlooks are shown.")
-    md += ["## Caveats", " ".join(cav)]
+    md += ["## Caveats", ">! " + " ".join(cav)]
 
     for (head, body, rule), e in zip(secs, ents):
         c = (ana.get("companies") or {}).get(e["label"], {}) if good else {}
         md += head + body
         if c.get("means"):
-            md += ["### What this means (analysis)", prose(c["means"])]
+            md += ["### What this means (analysis)", "> " + prose(c["means"])]
         md.append(f"### Outlook for {nxt}")
         if c.get("next"):
-            md.append(prose(c["next"]))
+            md.append("> " + prose(c["next"]))
         md += rule
 
     # ---------------- everything below is sources and method ----------------
@@ -433,5 +450,5 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
     text = "\n".join(md)
     (out_dir / "report.md").write_text(text, encoding="utf-8")
     pdf = render_markdown_pdf(text, out_dir / "report.pdf",
-                              f"AI competitor report: {company['label']}")
+                              f"AI competitor report: {company['label']}", bw=bw)
     return {"pdf": pdf, "checks": checks, "link_stats": dict(stats)}

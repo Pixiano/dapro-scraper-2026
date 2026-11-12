@@ -139,11 +139,14 @@ def run(facts: str, names: list[str], refs: dict[int, str], **fmt: str) -> dict:
     if r.get("error"):
         return r
     r["companies"] = {n: {"means": [], "next": []} for n in names}
-    for i in range(0, len(names), BATCH):
-        part = names[i:i + BATCH]
+    queue = [names[i:i + BATCH] for i in range(0, len(names), BATCH)]
+    while queue:
+        part = queue.pop(0)
         r2 = _ask(facts, part, refs, fmt)
         r["raw"] += f"\n\n--- {', '.join(part)} ---\n" + (r2.get("raw") or "")
-        if r2.get("error"):
+        if r2.get("error") and len(part) > 1:  # failed batch: retry one company at a time
+            queue += [[n] for n in part]
+        elif r2.get("error"):
             r.setdefault("failed", []).extend(part)
         else:
             r["companies"].update(r2["companies"])
@@ -153,5 +156,5 @@ def run(facts: str, names: list[str], refs: dict[int, str], **fmt: str) -> dict:
 
 def prose(claims: list[dict]) -> str:
     """Claims -> one readable paragraph, confidence and sources after each sentence."""
-    return " ".join(f"{c['text'].rstrip('.')}. *({c['confidence']})* "
+    return " ".join(f"{c['text'].rstrip('.')}. {{{{{c['confidence']}}}}} "
                     + "".join(f"[{s}]" for s in c["sources"]) for c in claims)

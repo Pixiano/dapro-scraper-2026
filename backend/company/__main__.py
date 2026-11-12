@@ -17,6 +17,7 @@ def main() -> None:
     ap.add_argument("--competitors", help='skip search: "OpenAI,Anthropic"')
     ap.add_argument("--no-vision", action="store_true",
                     help="skip the homepage screenshots + local vision model notes")
+    ap.add_argument("--bw", action="store_true", help="black-and-white PDF (printing)")
     ap.add_argument("--no-analysis", action="store_true",
                     help="skip the local-model analysis paragraphs (summary, meaning, next quarter)")
     ap.add_argument("--social", action="store_true",
@@ -32,7 +33,7 @@ def main() -> None:
     try:
         r = run(args.name, args.url, args.categories, args.per_category, args.top, names,
                 args.social, vision=not args.no_vision, fresh=args.fresh,
-                context=args.context, analysis=not args.no_analysis)
+                context=args.context, analysis=not args.no_analysis, bw=args.bw)
     finally:
         server.stop()  # free the GPU: no model is needed after the run
     data = r["collected"]
