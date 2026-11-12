@@ -243,7 +243,10 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
                   + (f"News and search required the word '{_t(company['context'])}'."
                      if company.get("context") else
                      "News may mix in the other meaning; rerun with `--context <word>`."))
-    md.append(f"- **{len(ents) - 1} of 10 competitors** reached medium or high confidence"
+    user = raw["competitors"]["mode"] == "user"
+    md.append(f"- **{len(ents) - 1} competitors named by you** (`--competitors`), not found "
+              "or ranked by search." if user else
+              f"- **{len(ents) - 1} of 10 competitors** reached medium or high confidence"
               + (" (live search found too few; low-confidence names are listed at the end, "
                  "or name them yourself with `--competitors`)." if len(ents) < 11 else "."))
     if len(ents) > 1:
@@ -272,10 +275,14 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
 
     # caveats: facts the code knows, written as sentences (not model output)
     cav = []
-    if len(ents) < 11:
+    if user:
+        cav.append("The competitors were named by you, so this report does not show whether "
+                   "the web agrees they are the closest rivals.")
+    elif len(ents) < 11:
         cav.append(f"Only {len(ents) - 1} of the 10 requested competitors were confirmed by "
                    "two or more independent sites, so the comparison is narrower than it looks.")
-    if not any(x.get("engine") == "brave" for m in metas[1:] for x in m.get("evidence") or []):
+    if not user and not any(x.get("engine") == "brave" for m in metas[1:]
+                            for x in m.get("evidence") or []):
         cav.append("Competitors were found with DuckDuckGo alone, which returns few results; "
                    "adding a Brave Search key usually finds more.")
     cav.append("The outlook counts headlines, not deals or revenue: a busy news quarter means "
