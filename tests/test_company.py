@@ -621,3 +621,28 @@ def test_minor_categories_dropped_and_shared_name_pinned(monkeypatch):
     assert r["qid"] == "QE" and r["search_name"] == "Gemini"
     assert r["ambiguous_with"] == "Gemini (constellation)"
     assert cp._queries({"label": "Gemini", "self": True, "context": "crypto"})[0] == '"Gemini" crypto vs'
+
+
+def test_cli_progress_and_summary(monkeypatch, tmp_path):
+    from backend.company import __main__ as cli
+    from backend.company import collect, competitors, pipeline, report, visual
+    co = {"label": "Acme", "qid": None, "on_wikidata": False, "categories": [],
+          "links": {"website": None}, "errors": ["x.org: ConnectError: offline"]}
+    ent = lambda lbl: {"label": lbl, "items": [{"quarter": "Q3"}], "errors": []}  # noqa: E731
+    monkeypatch.setattr(pipeline, "OUT", tmp_path)
+    monkeypatch.setattr(wd, "resolve", lambda *a, **k: co)
+    monkeypatch.setattr(competitors, "guess_website", lambda n, e: None)
+    monkeypatch.setattr(competitors, "discover", lambda *a: {"overall": [
+        {"label": "Rival", "confidence": "high"}]})
+    monkeypatch.setattr(collect, "collect", lambda c, o, social: {
+        "company": ent("Acme"), "competitors": [ent("Rival")],
+        "quarters": [{"label": "Q2"}, {"label": "Q3"}]})
+    monkeypatch.setattr(visual, "notes", lambda e, d: pytest.fail("vision is off"))
+    monkeypatch.setattr(report, "build", lambda raw, d, **k: {
+        "pdf": d / "report.pdf", "checks": [], "link_stats": {"live": 2}})
+    lines: list[str] = []
+    r = pipeline.run("Acme", vision=False, progress=lines.append)
+    assert [x[:3] for x in lines if x[0].isdigit()] == ["1/5", "2/5", "3/5", "4/5", "5/5"]
+    assert any("startup" in x for x in lines) and any("offline" in x for x in lines)
+    s = cli.summary(r)
+    assert "Rival" in s and "high" in s and "2 live" in s and "report.pdf" in s

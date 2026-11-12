@@ -179,7 +179,11 @@ A separate pipeline from the creator dossier. Give it a company; it finds the co
 .venv\Scripts\python -m backend.company "Adaption Labs" --url https://adaptionlabs.ai     # startups / ambiguous names
 .venv\Scripts\python -m backend.company "OpenAI" --competitors "Anthropic,Mistral AI,Meta" # skip the search
 .venv\Scripts\python -m backend.company "OpenAI" --social   # + Instagram/Facebook profile numbers
+.venv\Scripts\python -m backend.company "Alphabet" --open   # open the PDF when done
+.venv\Scripts\python -m backend.company --help              # all options, grouped, with examples
 ```
+
+While it runs, the CLI prints one line per stage with the elapsed time (`[1:42] 3/5 collect ...`); at the end it lists the competitors with their confidence, items per quarter per company, link stats, and the PDF path. Errors print as one line (`--debug` shows the traceback); Ctrl+C stops cleanly.
 
 Or in the browser: start the server (see Setup) and open `http://localhost:8123/company.html`. Type a company, click *Build report*, and the PDF opens when it is done; past reports are listed below the form.
 
