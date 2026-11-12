@@ -114,8 +114,18 @@ def _t(s: str) -> str:
     return re.sub(r"[\[\]*`]", "", s or "").strip()  # keep the PDF markup intact
 
 
-def _d(iso: str | date | None) -> str:
-    """'2026-09-17' -> '17 Sep 2026'; '2026-11-12T09:02:22+00:00' -> '12 Nov 2026, 09:02 UTC'."""
+def _ago(days: int) -> str:
+    """Recent only: '(today)', '(3 days ago)', '(last week)', '(2 weeks ago)'; older -> ''."""
+    if not 0 <= days <= 30:
+        return ""
+    return (" (today)" if days == 0 else " (yesterday)" if days == 1 else
+            f" ({days} days ago)" if days < 7 else " (last week)" if days < 14 else
+            f" ({days // 7} weeks ago)")
+
+
+def _d(iso: str | date | None, now: datetime | None = None) -> str:
+    """'2026-09-17' -> '17 Sep 2026'; timestamps -> system local time with its zone:
+    '12 Nov 2026, 14:32 India Standard Time (today)'."""
     if not iso:
         return "-"
     s = str(iso)
@@ -123,8 +133,12 @@ def _d(iso: str | date | None) -> str:
         d = datetime.fromisoformat(s)
     except ValueError:
         return s
-    day = f"{d.day} {d:%b %Y}"
-    return f"{day}, {d:%H:%M} UTC" if "T" in s else day
+    now = now or datetime.now().astimezone()
+    if "T" in s:
+        d = d.astimezone(now.tzinfo) if d.tzinfo else d
+        return f"{d.day} {d:%b %Y, %H:%M} {d.tzname() or ''}".rstrip() + \
+            _ago((now.date() - d.date()).days)
+    return f"{d.day} {d:%b %Y}" + _ago((now.date() - d.date()).days)
 
 
 def _st(url: str, checks: dict) -> str:

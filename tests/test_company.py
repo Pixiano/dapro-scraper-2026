@@ -393,7 +393,13 @@ def test_build_report_pdf(tmp_path, monkeypatch):
     md = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert out["pdf"].exists() and "[Rival LLM beta](u2)" in md and "dead3" not in md
     assert "Q3 2026 1/3" in md  # "Rival AI" is the name, not AI news
-    assert "- 1 Aug 2026 · Rival LLM beta" in md and "2026-08-01" not in md  # readable dates
+    assert "- 1 Aug 2026" in md and "2026-08-01" not in md  # readable dates
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 11, 12, 15, 0, tzinfo=timezone(timedelta(hours=5, minutes=30), "IST"))
+    assert report._d("2026-11-10", now) == "10 Nov 2026 (2 days ago)"
+    assert report._d("2026-11-03", now) == "3 Nov 2026 (last week)"
+    assert report._d("2026-08-01", now) == "1 Aug 2026"
+    assert report._d("2026-11-12T09:02:22+00:00", now) == "12 Nov 2026, 14:32 IST (today)"
     # findings first (scorecard row, cited item), sources and method after
     assert md.index("| 1 | Rival |") < md.index("Rival LLM beta · *Hacker News") \
         < md.index("# Sources and method") < md.index("[Rival LLM beta](u2)")
