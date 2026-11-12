@@ -417,7 +417,7 @@ def test_build_report_pdf(tmp_path, monkeypatch):
     md = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert "Rival ships LLMs. *(medium)* [1]" in md and "More LLM news." in md
     assert "$5B" not in md and "Acme trails" not in md  # invented number, fake citation
-    assert "2 sentences failed and were removed" in md
+    assert "4 sentences failed and were removed" in md  # main call + top-up for Acme
     assert md.index("## Summary (analysis)") < md.index("## Scorecard")
     monkeypatch.setattr(client, "complete", lambda *a, **k: "not json")
     report.build(raw, tmp_path, use_model=True)  # fail soft
@@ -432,6 +432,9 @@ def test_build_report_pdf(tmp_path, monkeypatch):
                           set(), "accenture") == "name not in the cited headlines"
     assert analysis.check(claim("Accenture will test with Anthropic in Q4 2026.", [1]), refs,
                           {"4", "2026"}, "accenture") is None  # "Q4" is not a name
+    misplaced = '{"companies": {}, "Accenture": {"means": [{"text": "Safety work.", ' \
+                '"confidence": "low", "sources": [1]}]}}'
+    assert analysis.parse(misplaced, ["Accenture"], refs, "")["companies"]["Accenture"]["means"]
 
 
 # ---- phase 2-4 review fixes ----

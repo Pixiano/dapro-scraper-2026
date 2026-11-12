@@ -325,7 +325,10 @@ def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
                    + " and that names it mentions appear in those sources, but not that "
                    "the reading is right: a word like 'agentic' can still be the model's "
                    "own gloss. High confidence needs two or more sources; predictions are "
-                   "capped at medium.")
+                   "capped at medium."
+                   + (f" The model's reply for {', '.join(_t(x) for x in ana['failed'])} could "
+                      "not be read, so they have no analysis paragraphs."
+                      if ana.get("failed") else ""))
     elif use_model:
         cav.append(f"The local model analysis was unavailable this run "
                    f"({_t(ana.get('error') or '')}), so only rule-based outlooks are shown.")

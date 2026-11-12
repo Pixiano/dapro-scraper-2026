@@ -24,7 +24,7 @@ Write an analysis in plain, readable English, as JSON with this exact shape:
   "companies": {{"<exact company name>": {{"means": [claims], "next": [claims]}}}}}}
 "means": 2-3 claims reading that company's headlines together (strategy, partners, themes).
 "next": 1-3 claims predicting what it will do in AI in {nxt}, based on its trend and headlines.
-Include every company listed below in "companies", using its exact name.
+THIS REPLY: {task}
 
 Each claim is {{"text": "...", "confidence": "high|medium|low", "sources": [n, ...]}}.
 Rules:
@@ -42,6 +42,7 @@ FACTS
 {facts}"""
 NUM = re.compile(r"\d+(?:[.,]\d+)*")
 CONF = {"high", "medium", "low"}
+BATCH = 4  # companies per model reply
 
 
 def _names(text: str) -> list[str]:
@@ -100,6 +101,8 @@ def parse(text: str, names: list[str], refs: dict[int, str], facts: str) -> dict
                             "sources": c["sources"]})
         return out
     comps = js.get("companies") if isinstance(js.get("companies"), dict) else {}
+    # the model sometimes puts a company at the top level instead of under "companies"
+    comps = {**{n: js[n] for n in names if isinstance(js.get(n), dict)}, **comps}
     return {"summary": ok(js.get("summary")), "compare": ok(js.get("compare")),
             "companies": {n: {"means": ok((comps.get(n) or {}).get("means")),
                               "next": ok((comps.get(n) or {}).get("next"), cap=True)}
@@ -107,21 +110,45 @@ def parse(text: str, names: list[str], refs: dict[int, str], facts: str) -> dict
             "dropped": dropped, "error": None}
 
 
-def run(facts: str, names: list[str], refs: dict[int, str], **fmt: str) -> dict:
-    """Free text first; on broken JSON, one retry with llama.cpp's JSON mode.
-    "raw" keeps the last reply for the audit file next to the report."""
+def _ask(facts: str, names: list[str], refs: dict[int, str], fmt: dict) -> dict:
+    """names empty -> summary + compare only; else those companies only.
+    Free text first; on broken JSON, one retry with llama.cpp's JSON mode."""
+    task = (f'leave "summary" and "compare" as []; "companies" must contain exactly '
+            f'these names, each once: {", ".join(names)}.' if names else
+            'fill "summary" and "compare"; leave "companies" as {}.')
     text, err = "", ""
     for json_mode in (False, True):
         try:
-            text = client.complete(PROMPT.format(facts=facts, **fmt), system=SYSTEM,
-                                   max_tokens=8000, temperature=0.2,
-                                   reasoning_effort="medium", json_mode=json_mode)
+            text = client.complete(PROMPT.format(facts=facts, task=task, **fmt),
+                                   # empty reply = budget spent thinking; "low" + room
+                                   system=SYSTEM, max_tokens=12000, temperature=0.2,
+                                   reasoning_effort="low", json_mode=json_mode)
             return {**parse(text, names, refs, facts), "raw": text}
         except (ValueError, AttributeError) as exc:  # bad / non-object JSON: retry
             err = f"{type(exc).__name__}: {str(exc)[:160]}"
         except Exception as exc:  # no server / model / GPU: no point retrying
             return {"error": f"{type(exc).__name__}: {str(exc)[:160]}", "raw": text}
     return {"error": err, "raw": text}
+
+
+def run(facts: str, names: list[str], refs: dict[int, str], **fmt: str) -> dict:
+    """Short replies survive: one call for summary + compare, then companies in
+    batches of BATCH (11 companies in one reply ran out of tokens mid-JSON).
+    A failed batch costs only its companies. "raw" keeps every reply for audit."""
+    r = _ask(facts, [], refs, fmt)
+    if r.get("error"):
+        return r
+    r["companies"] = {n: {"means": [], "next": []} for n in names}
+    for i in range(0, len(names), BATCH):
+        part = names[i:i + BATCH]
+        r2 = _ask(facts, part, refs, fmt)
+        r["raw"] += f"\n\n--- {', '.join(part)} ---\n" + (r2.get("raw") or "")
+        if r2.get("error"):
+            r.setdefault("failed", []).extend(part)
+        else:
+            r["companies"].update(r2["companies"])
+            r["dropped"] += r2["dropped"]
+    return r
 
 
 def prose(claims: list[dict]) -> str:
