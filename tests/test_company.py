@@ -718,3 +718,8 @@ def test_cli_progress_and_summary(monkeypatch, tmp_path):
     assert any("startup" in x for x in lines) and any("offline" in x for x in lines)
     s = cli.summary(r)
     assert "Rival" in s and "high" in s and "2 live" in s and "report.pdf" in s
+    # startup tips: only for options this run did not use
+    assert [t.split("?")[0] for t in cli.tips(set(), False)] == [
+        "know the rivals", "startup or shared name", "slow, or low on memory", "few rivals found"]
+    assert cli.tips({"competitors", "url", "no_vision"}, False) == []
+    assert not any("BRAVE" in t for t in cli.tips(set(), True))

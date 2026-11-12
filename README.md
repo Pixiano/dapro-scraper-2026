@@ -170,9 +170,9 @@ They need real network access and (for the website/GitHub collectors) an install
 
 ---
 
-## Second mechanism: company AI competitor reports (CLI, no LLM)
+## Second mechanism: company AI competitor reports (CLI + local page)
 
-A separate pipeline from the creator dossier. Give it a company; it finds the competitors, collects what each did in AI over the last quarters, and writes a PDF with every claim linked. No LLM anywhere: every number is a count, every inference a stated rule. Full plan: [PLAN-COMPANY.md](PLAN-COMPANY.md).
+A separate pipeline from the creator dossier. Give it a company; it finds the competitors, collects what each did in AI over the last quarters, and writes a PDF with every claim linked. Every number is a count and every outlook a stated rule; the optional analysis paragraphs come from the local model and are checked by code (see Analysis below). Full plan: [PLAN-COMPANY.md](PLAN-COMPANY.md).
 
 ```powershell
 .venv\Scripts\python -m backend.company "Alphabet"
@@ -182,6 +182,8 @@ A separate pipeline from the creator dossier. Give it a company; it finds the co
 .venv\Scripts\python -m backend.company "Alphabet" --open   # open the PDF when done
 .venv\Scripts\python -m backend.company --help              # all options, grouped, with examples
 ```
+
+Started with no arguments it prints the help: examples plus a "which option when" list. At the start of a run it prints the same recommendations for the options you did not use (name the rivals, pin with `--url`, skip the models, set the Brave key). **Keys** go in `.env` in the project folder (git-ignored; copy `.env.example`): `BRAVE_API_KEY=` for a fuller competitor search, `YOUTUBE_API_KEY=` for full YouTube history. No AI key is needed: the models run locally.
 
 While it runs, the CLI prints one line per stage with the elapsed time (`[1:42] 3/5 collect ...`); at the end it lists the competitors with their confidence, items per quarter per company, link stats, and the PDF path. Errors print as one line (`--debug` shows the traceback); Ctrl+C stops cleanly.
 
