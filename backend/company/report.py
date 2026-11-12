@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..pdf import render_markdown_pdf
 from . import linkcheck, visual
+from .analysis import prose
 
 # Word-boundary AI vocabulary. "AI" is case-sensitive ("ai" in other words is
 # not AI); the entity's own name is removed first so "Mistral AI" / "OpenAI"
@@ -129,7 +130,8 @@ def focus(a: dict, last: str, cur: str) -> str:
     return "; ".join(parts) or "too few AI headlines to tell"
 
 
-def build(raw: dict, out_dir: Path) -> dict:
+def build(raw: dict, out_dir: Path, use_model: bool = False) -> dict:
+    """use_model: add the checked local-model analysis (pipeline: on)."""
     col = raw["collected"]
     quarters = col["quarters"]
     labels = [q["label"] for q in quarters]
@@ -169,10 +171,69 @@ def build(raw: dict, out_dir: Path) -> dict:
                 f"confidence {i['confidence']}* {refs}")
 
     rows = list(zip(ents, metas, an, picks))
+    own = {company.get("label"), company.get("search_name")}
+    secs, facts = [], []  # per-company sections (assigns [n]) and the model's fact sheet
+    for n, (e, m, a, p) in enumerate(rows):
+        o = a["outlook"]
+        cats = ["direct rival" if c in own else c for c in m.get("categories") or []]
+        head = [f"## {_t(e['label'])} (the company)" if n == 0 else f"## {n}. {_t(e['label'])}"]
+        if n:
+            ev = [x for x in (m.get("evidence") or []) if x["url"] in alive][:3]
+            head.append(f"- **Competes in**: {_t(', '.join(cats) or 'named by you (--competitors)')}"
+                        f" · confidence {m.get('confidence')}, named as a competitor on "
+                        f"{len(m.get('domains') or [])} sites "
+                        + "".join(cite(x["url"], _t(x["title"][:120]),
+                                       f"competitor evidence via {x['engine']}") for x in ev)
+                        + (" · different Wikidata class from the category (-1 level)"
+                           if m.get("off_class") else "")
+                        + (f" · same owner, merged: {_t(', '.join(m['also']))}"
+                           if m.get("also") else ""))
+        head.append("- **AI items / all items collected**: " + " · ".join(
+            f"{lb} {a['counts'][lb]}/{a['total'][lb]}" for lb in labels))
+        did_last = [i for i in p[last] if i["url"] in alive][:TOP]
+        so_far = [i for i in p[cur] if i["url"] in alive][:3]
+        body = [f"### What they did in AI in {last}"]
+        body += [did(i) for i in did_last] or ["- no AI headlines found"]
+        if so_far:
+            body += [f"### So far in {cur}"] + [did(i) for i in so_far]
+        rule = [f"- **Activity (rule)**: **{o['trend']}**, run-rate ~{o['projection']} AI items "
+                f"vs {o['last']} in {last} (confidence {o['confidence']})",
+                f"- **Likely focus (rule)**: {focus(a, last, cur)}"]
+        secs.append((head, body, rule))
+        role = "COMPANY (the subject)" if n == 0 else f"COMPETITOR {n}"
+        facts.append(
+            f"{role}: {e['label']}"
+            + (f"; competes in: {', '.join(cats) or 'named by the user'}; competitor "
+               f"confidence: {m.get('confidence')}" if n else "")
+            + f"\nAI items {last}: {a['counts'][last]}; {cur}: {a['counts'][cur]}; "
+            f"outlook rule for {nxt}: {o['trend']}, run-rate ~{o['projection']} "
+            f"({o['confidence']} confidence); focus rule: {focus(a, last, cur)}\nHeadlines:\n"
+            + "\n".join(f"[{srcs[i['url']][0]}] {i['published']} {SRC[i['source']]}: "
+                        f"{_t(i['title'])}" for i in did_last + so_far))
+
+    ana: dict = {}
+    if use_model:
+        from . import analysis
+        ana = analysis.run("\n\n".join(facts), [e["label"] for e in ents],
+                           {n: title for n, title, _ in srcs.values()}, company=company["label"],
+                           today=str(today), last=last, cur=cur, nxt=nxt)
+        # audit trail: the model's reply as given, before the code checks
+        (out_dir / "analysis_raw.txt").write_text(ana.get("raw") or "", encoding="utf-8")
+    good = bool(ana) and not ana.get("error")
+    tag = ("*Written by the local model (gpt-oss-20b) from the facts in this report; every "
+           "sentence cites its sources and was checked by code for citations and numbers.*")
+
     md = [f"# AI competitor report: {_t(company['label'])}",
           f"Generated {today} · what each competitor did in AI in {last} and so far in "
-          f"{cur}, and a rule-based outlook for {nxt}. Counts and stated rules, no LLM; "
-          "sources and method at the end."]
+          f"{cur}, and an outlook for {nxt}. Sources and method at the end."]
+    if good and ana["summary"]:
+        md += ["## Summary (analysis)", tag, prose(ana["summary"])]
+    md += ["## How to use this report",
+           "Start with the scorecard to see who is most active in AI and whose activity is "
+           f"rising. Each company section then lists what it actually did in {last} (dated "
+           "headlines you can open through the [n] source numbers at the end), followed by "
+           "an outlook. Treat the analysis paragraphs as a starting point: they are only as "
+           "good as the headlines they cite, so open the sources before relying on a claim."]
 
     md.append("## Key findings")
     if company.get("ambiguous_with"):
@@ -200,43 +261,51 @@ def build(raw: dict, out_dir: Path) -> dict:
     md.append("|---|---|---|---|---|---|---|")
     for n, (e, m, a, _) in enumerate(rows):
         o = a["outlook"]
-        own = {company.get("label"), company.get("search_name")}
         cats = ["direct rival" if c in own else c for c in m.get("categories") or []]
         where = "(the company)" if n == 0 else _t(", ".join(cats) or "named by you")
         md.append(f"| {n or '-'} | {_t(e['label'])} | {where} | "
                   f"{'-' if n == 0 else m.get('confidence', '?')} | {a['counts'][last]} | "
                   f"{a['counts'][cur]} | {o['trend']}, ~{o['projection']} ({o['confidence']}) |")
+    if good and ana["compare"]:
+        md += [f"### {_t(company['label'])} vs its competitors (analysis)",
+               prose(ana["compare"])]
 
-    for n, (e, m, a, p) in enumerate(rows):
-        o = a["outlook"]
-        md.append(f"## {_t(e['label'])} (the company)" if n == 0 else
-                  f"## {n}. {_t(e['label'])}")
-        if n:
-            why = ", ".join("direct rival (searched as the company itself)"
-                            if c in {company.get("label"), company.get("search_name")} else c
-                            for c in m.get("categories") or []) or "named by you (--competitors)"
-            ev = [x for x in (m.get("evidence") or []) if x["url"] in alive][:3]
-            md.append(f"- **Competes in**: {_t(why)} · confidence {m.get('confidence')}, named "
-                      f"as a competitor on {len(m.get('domains') or [])} sites "
-                      + "".join(cite(x["url"], _t(x["title"][:120]),
-                                       f"competitor evidence via {x['engine']}") for x in ev)
-                      + (" · different Wikidata class from the category (-1 level)"
-                         if m.get("off_class") else "")
-                      + (f" · same owner, merged: {_t(', '.join(m['also']))}"
-                         if m.get("also") else ""))
-        md.append("- **AI items / all items collected**: " + " · ".join(
-            f"{lb} {a['counts'][lb]}/{a['total'][lb]}" for lb in labels))
-        md.append(f"### What they did in AI in {last}")
-        md += [did(i) for i in [i for i in p[last] if i["url"] in alive][:TOP]] \
-            or ["- no AI headlines found"]
-        so_far = [i for i in p[cur] if i["url"] in alive][:3]
-        if so_far:
-            md.append(f"### So far in {cur}")
-            md += [did(i) for i in so_far]
-        md.append(f"### Outlook for {nxt} (inference, rule-based, not a forecast)")
-        md.append(f"- **Activity**: **{o['trend']}**, run-rate ~{o['projection']} AI items vs "
-                  f"{o['last']} in {last} (confidence {o['confidence']})")
-        md.append(f"- **Likely focus**: {focus(a, last, cur)}")
+    # caveats: facts the code knows, written as sentences (not model output)
+    cav = []
+    if len(ents) < 11:
+        cav.append(f"Only {len(ents) - 1} of the 10 requested competitors were confirmed by "
+                   "two or more independent sites, so the comparison is narrower than it looks.")
+    if not any(x.get("engine") == "brave" for m in metas[1:] for x in m.get("evidence") or []):
+        cav.append("Competitors were found with DuckDuckGo alone, which returns few results; "
+                   "adding a Brave Search key usually finds more.")
+    cav.append("The outlook counts headlines, not deals or revenue: a busy news quarter means "
+               f"more AI coverage, not necessarily more AI work. The {nxt} figure extends the "
+               "pace so far; it is not a forecast.")
+    cav.append("Google News is dominated by press releases and finance sites, and company "
+               "blogs and YouTube feeds only return their latest posts.")
+    if use_model and good:
+        cav.append("The analysis paragraphs come from a local language model. Code checked "
+                   "that each sentence cites real sources and uses no number missing from them"
+                   + (f" ({len(ana['dropped'])} sentences failed and were removed)"
+                      if ana["dropped"] else "")
+                   + " and that names it mentions appear in those sources, but not that "
+                   "the reading is right: a word like 'agentic' can still be the model's "
+                   "own gloss. High confidence needs two or more sources; predictions are "
+                   "capped at medium.")
+    elif use_model:
+        cav.append(f"The local model analysis was unavailable this run "
+                   f"({_t(ana.get('error') or '')}), so only rule-based outlooks are shown.")
+    md += ["## Caveats", " ".join(cav)]
+
+    for (head, body, rule), e in zip(secs, ents):
+        c = (ana.get("companies") or {}).get(e["label"], {}) if good else {}
+        md += head + body
+        if c.get("means"):
+            md += ["### What this means (analysis)", prose(c["means"])]
+        md.append(f"### Outlook for {nxt}")
+        if c.get("next"):
+            md.append(prose(c["next"]))
+        md += rule
 
     # ---------------- everything below is sources and method ----------------
     md += ["---", "# Sources and method", "## How to read this",
@@ -259,6 +328,10 @@ def build(raw: dict, out_dir: Path) -> dict:
           "- **Vision notes**: a local vision model reads a screenshot of each homepage "
           "and lists the AI products visible on it. Model output, **unverified**: check "
           "against the screenshot; never used in any count, confidence or outlook.",
+          "- **Analysis paragraphs** (marked 'analysis'): written by the local model "
+          "gpt-oss-20b from this report's own headlines and counts. Code drops any "
+          "sentence without a valid [n] citation, without a confidence, or with a number "
+          "not in its facts. Never used in any count, confidence or rule-based outlook.",
           f"- **Likely focus**: AI terms in {last} and {cur} headlines; terms in both "
           "quarters are 'continuing', terms only in the current one are 'newer'. A rule "
           "over headline words, not a forecast.",

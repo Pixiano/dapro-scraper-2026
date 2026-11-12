@@ -27,6 +27,7 @@ class RunIn(BaseModel):
     competitors: str | None = None
     social: bool = False
     vision: bool = True
+    analysis: bool = True
     fresh: bool = False
     context: str | None = None
 
@@ -36,7 +37,8 @@ def _work(rid: str, body: RunIn) -> None:
     try:
         names = [n.strip() for n in (body.competitors or "").split(",") if n.strip()]
         r = run(body.name.strip(), body.url or None, names=names, social=body.social,
-                vision=body.vision, fresh=body.fresh, context=body.context)
+                vision=body.vision, fresh=body.fresh, context=body.context,
+                analysis=body.analysis)
         d = r["out_dir"]
         _runs[rid].update(status="done", report=f"{d.parent.name}/{d.name}",
                           timing=r["timing_s"], links=r["link_stats"],

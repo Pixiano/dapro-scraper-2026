@@ -17,6 +17,8 @@ def main() -> None:
     ap.add_argument("--competitors", help='skip search: "OpenAI,Anthropic"')
     ap.add_argument("--no-vision", action="store_true",
                     help="skip the homepage screenshots + local vision model notes")
+    ap.add_argument("--no-analysis", action="store_true",
+                    help="skip the local-model analysis paragraphs (summary, meaning, next quarter)")
     ap.add_argument("--social", action="store_true",
                     help="add Instagram/Facebook profile summaries (public page, no login)")
     ap.add_argument("--context", help='extra word required in news/search for a shared '
@@ -30,9 +32,9 @@ def main() -> None:
     try:
         r = run(args.name, args.url, args.categories, args.per_category, args.top, names,
                 args.social, vision=not args.no_vision, fresh=args.fresh,
-                context=args.context)
+                context=args.context, analysis=not args.no_analysis)
     finally:
-        server.stop()  # free the GPU: the vision model is not needed after the run
+        server.stop()  # free the GPU: no model is needed after the run
     data = r["collected"]
     for e in [data["company"], *data["competitors"]]:
         counts = {q["label"]: sum(i["quarter"] == q["label"] for i in e["items"])

@@ -397,6 +397,33 @@ def test_build_report_pdf(tmp_path, monkeypatch):
     assert md.index("| 1 | Rival |") < md.index("Rival LLM beta · *Hacker News") \
         < md.index("# Sources and method") < md.index("[Rival LLM beta](u2)")
 
+    # model analysis: placed in the top half, cited, and code-checked
+    from backend.company import analysis
+    from backend.llm import client
+    reply = ('{"summary": [{"text": "Rival ships LLMs.", "confidence": "medium", "sources": [1]},'
+             '{"text": "Rival raised $5B.", "confidence": "high", "sources": [1]}],'
+             '"compare": [{"text": "Acme trails.", "confidence": "low", "sources": [99]}],'
+             '"companies": {"Rival": {"next": [{"text": "More LLM news.", "confidence": '
+             '"medium", "sources": [1]}]}}}')
+    monkeypatch.setattr(client, "complete", lambda *a, **k: "```json\n" + reply + "\n```")
+    report.build(raw, tmp_path, use_model=True)
+    md = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "Rival ships LLMs. *(medium)* [1]" in md and "More LLM news." in md
+    assert "$5B" not in md and "Acme trails" not in md  # invented number, fake citation
+    assert "2 sentences failed and were removed" in md
+    assert md.index("## Summary (analysis)") < md.index("## Scorecard")
+    monkeypatch.setattr(client, "complete", lambda *a, **k: "not json")
+    report.build(raw, tmp_path, use_model=True)  # fail soft
+    assert "analysis was unavailable" in (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert analysis.check({"text": "x", "confidence": "sure", "sources": [1]}, {1: "h"},
+                          set(), "") == "no confidence"
+    refs = {1: "Anthropic brings in Accenture for AI safety testing", 2: "Qantas cuts roles"}
+    claim = lambda t, s: {"text": t, "confidence": "low", "sources": s}  # noqa: E731
+    assert analysis.check(claim("Accenture works with Anthropic on safety.", [1]), refs,
+                          set(), "accenture") is None
+    assert analysis.check(claim("Accenture is adding Claude. It grows.", [2]), refs,
+                          set(), "accenture") == "name not in the cited headlines"
+
 
 # ---- phase 2-4 review fixes ----
 

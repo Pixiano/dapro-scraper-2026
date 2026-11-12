@@ -14,7 +14,8 @@ OUT = BASE_DIR / "data" / "company"
 
 def run(name: str, url: str | None = None, categories: int = 5, per_category: int = 3,
         top: int = 10, names: list[str] | None = None, social: bool = False,
-        vision: bool = True, fresh: bool = False, context: str | None = None) -> dict:
+        vision: bool = True, fresh: bool = False, context: str | None = None,
+        analysis: bool = True) -> dict:
     pkg.FRESH = fresh  # ponytail: module flag; fine while runs are one at a time (web: 1 worker)
     t0 = time.perf_counter()
     company = wikidata.resolve(name, top=categories, url=url)
@@ -37,7 +38,7 @@ def run(name: str, url: str | None = None, categories: int = 5, per_category: in
     raw = {"company": company, "competitors": comps, "collected": data,
            "timing_s": {"resolve": round(t1 - t0, 1), "competitors": round(t2 - t1, 1),
                         "collect": round(t3 - t2, 1), "vision": round(t4 - t3, 1)}}
-    rep = report.build(raw, out_dir)
+    rep = report.build(raw, out_dir, use_model=analysis)
     raw["link_checks"] = rep["checks"]
     raw["timing_s"]["report"] = round(time.perf_counter() - t4, 1)
     (out_dir / "raw.json").write_text(json.dumps(raw, indent=2, ensure_ascii=False),
