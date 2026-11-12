@@ -393,6 +393,9 @@ def test_build_report_pdf(tmp_path, monkeypatch):
     md = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert out["pdf"].exists() and "[Rival LLM beta](u2)" in md and "dead3" not in md
     assert "Q3 2026 1/3" in md  # "Rival AI" is the name, not AI news
+    # findings first (scorecard row, cited item), sources and method after
+    assert md.index("| 1 | Rival |") < md.index("Rival LLM beta · *Hacker News") \
+        < md.index("# Sources and method") < md.index("[Rival LLM beta](u2)")
 
 
 # ---- phase 2-4 review fixes ----

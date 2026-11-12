@@ -25,6 +25,7 @@ FIRST_PARTY = {"blog", "medium", "youtube"}
 # Feeds that only return the latest N posts reach back into this quarter but
 # not the last one: counting them would bias the outlook toward "up".
 CAPPED = {"blog", "medium"}
+BASE = {"ai", "a.i."}  # in every AI headline: says nothing about focus
 TOP = 6  # items listed per quarter per entity
 
 
@@ -86,6 +87,9 @@ def analyse(e: dict, labels: list[str], cur_start: date, today: date) -> dict:
             "by_source": {s: [sum(i["quarter"] == lb and i["source"] == s for i in ai)
                               for lb in labels] for s in SRC},
             "themes": Counter(t for i in ai for t in set(i["terms"])).most_common(6),
+            "themes_q": {lb: [t for t, _ in Counter(t for i in ai if i["quarter"] == lb
+                                                    for t in set(i["terms"]) - BASE).most_common(5)]
+                         for lb in labels},
             "outlook": {**outlook(full[labels[1]], full[labels[2]], cur_start, today),
                         "last": full[labels[1]], "to_date": full[labels[2]]}}
 
@@ -115,12 +119,14 @@ def _st(url: str, checks: dict) -> str:
     return f"{c.get('status', 'unchecked')}{code}"
 
 
-def _item_line(i: dict, checks: dict, alive: set[str]) -> str:
-    pts = f" · {i['points']} points" if i.get("points") else ""
-    art = (f" · [article]({i['link']}) ({_st(i['link'], checks)})"
-           if i.get("link") in alive else "")
-    return (f"- {i['published']} · {SRC[i['source']]}{pts} · [{_t(i['title'])}]({i['url']})"
-            f" ({_st(i['url'], checks)}){art} · confidence: {i['confidence']}")
+def focus(a: dict, last: str, cur: str) -> str:
+    """Inference rule: AI terms in both quarters are the ongoing focus, terms only in
+    the current quarter are new. A stated rule over headline words, not a forecast."""
+    tl, tc = a["themes_q"][last], a["themes_q"][cur]
+    cont, new = [t for t in tc if t in tl], [t for t in tc if t not in tl]
+    parts = ([f"continuing {', '.join(cont)} (in both quarters)"] if cont else []) + \
+            ([f"newer: {', '.join(new)} (this quarter only)"] if new else [])
+    return "; ".join(parts) or "too few AI headlines to tell"
 
 
 def build(raw: dict, out_dir: Path) -> dict:
@@ -148,11 +154,92 @@ def build(raw: dict, out_dir: Path) -> dict:
     last, cur = labels[1], labels[2]
     nxt = cur.replace(" (to date)", "")
     company = raw["company"]
+    # numbered sources: the top half cites [n], the bottom half lists them
+    srcs: dict[str, tuple[int, str, str]] = {}
+
+    def cite(url: str, title: str, kind: str) -> str:
+        return f"[{srcs.setdefault(url, (len(srcs) + 1, title, kind))[0]}]"
+
+    def did(i: dict) -> str:
+        pts = f", {i['points']} points" if i.get("points") else ""
+        refs = cite(i["url"], _t(i["title"]), SRC[i["source"]])
+        if i.get("link") in alive:
+            refs += cite(i["link"], _t(i["title"]), "linked article")
+        return (f"- {i['published']} · {_t(i['title'])} · *{SRC[i['source']]}{pts}, "
+                f"confidence {i['confidence']}* {refs}")
+
+    rows = list(zip(ents, metas, an, picks))
     md = [f"# AI competitor report: {_t(company['label'])}",
-          f"Generated {today} · quarters {', '.join(labels)} · "
-          f"competitors: {raw['competitors']['mode']} · counts and stated rules; the only "
-          "model output is the labelled 'Vision notes' per company",
-          "## How to read this",
+          f"Generated {today} · what each competitor did in AI in {last} and so far in "
+          f"{cur}, and a rule-based outlook for {nxt}. Counts and stated rules, no LLM; "
+          "sources and method at the end."]
+
+    md.append("## Key findings")
+    if company.get("ambiguous_with"):
+        md.append(f"- **Shared name**: without the website pin, Wikidata reads "
+                  f"'{_t(company.get('search_name') or company['label'])}' as "
+                  f"{_t(company['ambiguous_with'])}. "
+                  + (f"News and search required the word '{_t(company['context'])}'."
+                     if company.get("context") else
+                     "News may mix in the other meaning; rerun with `--context <word>`."))
+    md.append(f"- **{len(ents) - 1} of 10 competitors** reached medium or high confidence"
+              + (" (live search found too few; low-confidence names are listed at the end, "
+                 "or name them yourself with `--competitors`)." if len(ents) < 11 else "."))
+    if len(ents) > 1:
+        busiest = max(rows[1:], key=lambda r: r[2]["counts"][last])
+        md.append(f"- **Most AI news in {last}**: {_t(busiest[0]['label'])} "
+                  f"({busiest[2]['counts'][last]} AI items).")
+    for word in ("up", "down", "new"):
+        xs = [_t(e["label"]) for e, _, a, _ in rows if a["outlook"]["trend"] == word]
+        if xs:
+            md.append(f"- **AI activity {word} into {nxt}** (run-rate rule): {', '.join(xs)}.")
+
+    md.append("## Scorecard")
+    md.append(f"| # | Company | Competes in | Confidence | AI items {last} | {cur} | "
+              f"{nxt} outlook |")
+    md.append("|---|---|---|---|---|---|---|")
+    for n, (e, m, a, _) in enumerate(rows):
+        o = a["outlook"]
+        own = {company.get("label"), company.get("search_name")}
+        cats = ["direct rival" if c in own else c for c in m.get("categories") or []]
+        where = "(the company)" if n == 0 else _t(", ".join(cats) or "named by you")
+        md.append(f"| {n or '-'} | {_t(e['label'])} | {where} | "
+                  f"{'-' if n == 0 else m.get('confidence', '?')} | {a['counts'][last]} | "
+                  f"{a['counts'][cur]} | {o['trend']}, ~{o['projection']} ({o['confidence']}) |")
+
+    for n, (e, m, a, p) in enumerate(rows):
+        o = a["outlook"]
+        md.append(f"## {_t(e['label'])} (the company)" if n == 0 else
+                  f"## {n}. {_t(e['label'])}")
+        if n:
+            why = ", ".join("direct rival (searched as the company itself)"
+                            if c in {company.get("label"), company.get("search_name")} else c
+                            for c in m.get("categories") or []) or "named by you (--competitors)"
+            ev = [x for x in (m.get("evidence") or []) if x["url"] in alive][:3]
+            md.append(f"- **Competes in**: {_t(why)} · confidence {m.get('confidence')}, named "
+                      f"as a competitor on {len(m.get('domains') or [])} sites "
+                      + "".join(cite(x["url"], _t(x["title"][:120]),
+                                       f"competitor evidence via {x['engine']}") for x in ev)
+                      + (" · different Wikidata class from the category (-1 level)"
+                         if m.get("off_class") else "")
+                      + (f" · same owner, merged: {_t(', '.join(m['also']))}"
+                         if m.get("also") else ""))
+        md.append("- **AI items / all items collected**: " + " · ".join(
+            f"{lb} {a['counts'][lb]}/{a['total'][lb]}" for lb in labels))
+        md.append(f"### What they did in AI in {last}")
+        md += [did(i) for i in [i for i in p[last] if i["url"] in alive][:TOP]] \
+            or ["- no AI headlines found"]
+        so_far = [i for i in p[cur] if i["url"] in alive][:3]
+        if so_far:
+            md.append(f"### So far in {cur}")
+            md += [did(i) for i in so_far]
+        md.append(f"### Outlook for {nxt} (inference, rule-based, not a forecast)")
+        md.append(f"- **Activity**: **{o['trend']}**, run-rate ~{o['projection']} AI items vs "
+                  f"{o['last']} in {last} (confidence {o['confidence']})")
+        md.append(f"- **Likely focus**: {focus(a, last, cur)}")
+
+    # ---------------- everything below is sources and method ----------------
+    md += ["---", "# Sources and method", "## How to read this",
           "- **AI item**: a headline/post whose title matches the AI keyword list (word "
           "boundary; the entity's own name is removed first, so 'Mistral AI' alone is not AI). "
           "Ambiguous terms (Gemini, Claude, Llama, Grok, Copilot, inference) count only "
@@ -172,73 +259,44 @@ def build(raw: dict, out_dir: Path) -> dict:
           "- **Vision notes**: a local vision model reads a screenshot of each homepage "
           "and lists the AI products visible on it. Model output, **unverified**: check "
           "against the screenshot; never used in any count, confidence or outlook.",
-          "## Summary"]
-    if company.get("ambiguous_with"):
-        md.append(f"- **Shared name**: without the website pin, Wikidata reads "
-                  f"'{_t(company.get('search_name') or company['label'])}' as "
-                  f"{_t(company['ambiguous_with'])}. "
-                  + (f"News and search required the word '{_t(company['context'])}'."
-                     if company.get("context") else
-                     "News may mix in the other meaning; rerun with `--context <word>`."))
-    if len(ents) == 1:  # say it, rather than pad the list with weak matches
-        md.append("- **No competitor reached medium confidence** in live search (too little "
-                  "coverage, or a name shared with something else). Low-confidence names, if "
-                  "any, are in the appendix; name them yourself with `--competitors`.")
-    for e, m, a in zip(ents, metas, an):
-        o = a["outlook"]
-        role = "the company" if m is company else f"{m.get('confidence', '?')} confidence"
-        md.append(f"- **{_t(e['label'])}** ({role}): AI items "
-                  + " · ".join(f"{lb} {a['counts'][lb]}" for lb in labels)
-                  + f" → {nxt} run-rate ~{o['projection']} ({o['trend']} vs {last}, "
-                  f"{o['confidence']} confidence)")
+          f"- **Likely focus**: AI terms in {last} and {cur} headlines; terms in both "
+          "quarters are 'continuing', terms only in the current one are 'newer'. A rule "
+          "over headline words, not a forecast.",
+          "- **[n]** numbers point to the numbered source list below."]
 
-    for n, (e, m, a, p) in enumerate(zip(ents, metas, an, picks)):
-        o = a["outlook"]
-        md.append(f"## {_t(e['label'])} (the company)" if n == 0 else
-                  f"## Competitor {n}: {_t(e['label'])}")
-        if n:
-            why = ", ".join(m.get("categories") or []) or "named by you (--competitors)"
-            md.append(f"- **Competes in**: {_t(why)} · confidence: {m.get('confidence')} · "
-                      f"{len(m.get('domains') or [])} domains"
-                      + (" · different Wikidata class from the category (-1 level)"
-                         if m.get("off_class") else "")
-                      + (f" · same owner, merged: {_t(', '.join(m['also']))}"
-                         if m.get("also") else ""))
-            for x in [x for x in (m.get("evidence") or []) if x["url"] in alive][:3]:
-                title = x["title"] if len(x["title"]) <= 120 else x["title"][:117] + "..."  # ddgs can glue titles
-                md.append(f"- Evidence: [{_t(title)}]({x['url']}) "
-                          f"({_st(x['url'], checks)}, via {x['engine']})")
+    md.append("## Profiles, sources by type and collection notes")
+    for n, (e, m, a, _) in enumerate(rows):
         prof = [f"[Wikidata]({m['wikidata_url']})"] if m.get("wikidata_url") else []
         prof += [f"[{k}]({v}) ({_st(v, checks)})" for k, v in (e.get("links") or {}).items()
                  if v and v in alive]
+        md.append(f"### {_t(e['label'])}")
         md.append(f"- **Profile**: {' · '.join(prof) or 'no official links found'} · "
                   f"searched as '{_t(e.get('searched_as') or '')}'")
-        md.append("- **AI items / all items collected**: " + " · ".join(
-            f"{lb} {a['counts'][lb]}/{a['total'][lb]}" for lb in labels))
-        md.append("- **AI items by source** (" + " / ".join(labels) + "): " + " · ".join(
-            f"{SRC[s]} {'/'.join(map(str, v))}" for s, v in a["by_source"].items() if any(v)))
-        if e.get("social"):  # --social: profile-level, never in the counts above
+        md.append("- **AI items by source** (" + " / ".join(labels) + "): " + (" · ".join(
+            f"{SRC[s]} {'/'.join(map(str, v))}" for s, v in a["by_source"].items() if any(v))
+            or "none"))
+        if a["themes"]:
+            md.append("- **AI terms, all quarters**: "
+                      + ", ".join(f"{t} ({c})" for t, c in a["themes"]))
+        o = a["outlook"]
+        md.append(f"- **Outlook working**: {o['to_date']} AI items from full-history sources "
+                  f"in {o['elapsed_days']} of {o['quarter_days']} days -> ~{o['projection']} "
+                  f"vs {o['last']} in {last}")
+        if e.get("social"):  # --social: profile-level, never in the counts
             md.append("- **Social profiles** (public page summary, not in counts): " + " · ".join(
                 f"[{k}]({s['url']}): " + (", ".join(f"{v} {f.replace('_', ' ')}"
                                                     for f, v in s.items()
                                                     if f not in ("url", "available"))
                                           if s["available"] else f"unavailable ({s['reason']})")
                 for k, s in e["social"].items()))
-        if a["themes"]:
-            md.append("- **Recurring AI terms** (inference: what its AI news is about): "
-                      + ", ".join(f"{t} ({c})" for t, c in a["themes"]))
-        md.append(f"- **Outlook {nxt}** (rule, not a forecast): {o['to_date']} AI items from "
-                  f"full-history sources in {o['elapsed_days']} of {o['quarter_days']} days → "
-                  f"run-rate ~{o['projection']} vs {o['last']} in {last} → **{o['trend']}** "
-                  f"(confidence {o['confidence']}: share of quarter elapsed and item count)")
-        for lb, head in ((last, f"Last quarter ({last}): top AI items"),
-                         (cur, f"This quarter so far ({cur}): top AI items")):
-            items = [i for i in p[lb] if i["url"] in alive][:TOP]
-            md.append(f"### {head}")
-            md += [_item_line(i, checks, alive) for i in items] or ["- none found"]
-        v = e.get("vision")
-        if v:  # model output, quarantined in its own labelled block
-            md.append(f"### Vision notes (local model, unverified) on {v.get('url') or '-'}")
+        if e.get("errors"):
+            md.append("- *Collection errors*: " + "; ".join(_t(x) for x in e["errors"][:5]))
+
+    vis = [(e, e["vision"]) for e, *_ in rows if e.get("vision")]
+    if vis:  # model output, quarantined at the back in its own labelled block
+        md.append("## Vision notes (local model, unverified)")
+        for e, v in vis:
+            md.append(f"### {_t(e['label'])}: {v.get('url') or '-'}")
             if v.get("text"):
                 md.append(f"*Read from a homepage screenshot at {v['at']}; "
                           f"saved as screenshots/{Path(v['screenshot']).name}.*")
@@ -246,14 +304,16 @@ def build(raw: dict, out_dir: Path) -> dict:
                        if visual.keep(ln)][:15]
             else:
                 md.append(f"- unavailable: {_t(v.get('error') or 'no output')}")
-        if e.get("errors"):
-            md.append("- *Collection errors*: " + "; ".join(_t(x) for x in e["errors"][:5]))
 
     low = [x for x in low if x["evidence"][0]["url"] in alive]
     if low:
         md.append("## Appendix: low-confidence names (one domain only)")
-        md += [f"- {_t(x['label'])}: [{_t(x['evidence'][0]['title'])}]({x['evidence'][0]['url']})"
-               f" ({_st(x['evidence'][0]['url'], checks)})" for x in low]
+        md += [f"- {_t(x['label'])}: [{_t(x['evidence'][0]['title'][:120])}]"
+               f"({x['evidence'][0]['url']}) ({_st(x['evidence'][0]['url'], checks)})"
+               for x in low]
+    md.append("## Sources")
+    md += [f"- [{n}] [{title}]({url}) · {kind} ({_st(url, checks)})"
+           for url, (n, title, kind) in srcs.items()]
     stats = Counter(c["status"] for c in checks.values())
     md.append("## Link check")
     md.append(f"- {len(checks)} links fetched: " + ", ".join(f"{k} {v}" for k, v in stats.items())

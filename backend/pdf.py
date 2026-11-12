@@ -18,7 +18,8 @@ from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.pdfmetrics import registerFontFamily
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import (HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table,
+                                TableStyle)
 
 _FONTS = r"C:\Windows\Fonts"
 _registered = False
@@ -114,10 +115,17 @@ def render_markdown_pdf(markdown: str, out_path: Path, title: str) -> Path:
     family = _family(markdown)
     styles = _styles(family)
 
-    flow = []
-    for raw in markdown.split("\n"):
+    flow: list = []
+    rows: list[list[str]] = []
+    for raw in markdown.split("\n") + [""]:
         line = raw.rstrip()
         s = line.strip()
+        if s.startswith("|"):  # Markdown table row: buffer until the table ends
+            rows.append([c.strip() for c in s.strip("|").split("|")])
+            continue
+        if rows:
+            flow.append(_table(rows, styles["body"]))
+            rows = []
         if not s:
             continue
         if s.startswith("# "):
@@ -145,6 +153,23 @@ def render_markdown_pdf(markdown: str, out_path: Path, title: str) -> Path:
         leftMargin=2 * cm, rightMargin=2 * cm, topMargin=1.8 * cm, bottomMargin=1.8 * cm)
     doc.build(flow, onLaterPages=_footer, onFirstPage=_footer)
     return out_path
+
+
+def _table(rows: list[list[str]], body: ParagraphStyle) -> Table:
+    """Pipe table, first row = header; column widths follow text length.
+    ponytail: no alignment syntax or cell spans; add when a report needs them"""
+    rows = [r for r in rows if not all(re.fullmatch(r":?-{3,}:?", c) for c in r)]
+    n = max(len(r) for r in rows)
+    rows = [r + [""] * (n - len(r)) for r in rows]
+    cell = ParagraphStyle("cell", parent=body, fontSize=8.5, leading=11, spaceAfter=0)
+    width = [min(max(len(r[j]) for r in rows), 40) + 4 for j in range(n)]
+    total = A4[0] - 4 * cm
+    t = Table([[Paragraph(_inline(c), cell) for c in r] for r in rows],
+              colWidths=[total * w / sum(width) for w in width], repeatRows=1, hAlign="LEFT")
+    t.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, "#dfe4ee"),
+                           ("BACKGROUND", (0, 0), (-1, 0), "#eef1f7"),
+                           ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+    return t
 
 
 def _footer(canvas, doc) -> None:
