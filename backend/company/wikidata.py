@@ -252,6 +252,11 @@ def resolve(name: str, top: int = 5, today: date | None = None,
     # minor holdings (Netflix -> Millarworld) get no "vs" coverage: under 5% of the
     # top category's pageviews is not a category anyone compares
     cats = [c for c in cats if c["pageviews"] >= cats[0]["pageviews"] * MIN_SHARE]
+    # Capgemini lists no products, only subsidiaries (Sogeti): "Sogeti vs" finds
+    # Sogeti's rivals, so a services company is searched as itself instead
+    products = {q for x in (ent, child) if x for q in claim_values(x, "P1056")}
+    if not any(c["qid"] in products for c in cats):
+        cats = []
     if not cats:  # Spotify Technology lists no products: the "Spotify" service item is the category
         q2 = search(name, errors, prefer_company=False)
         e2 = get_entities([q2], errors).get(q2) if q2 and q2 != qid else None

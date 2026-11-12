@@ -158,7 +158,7 @@ Open `http://localhost:8123`. Paste links. Click the big red button. Go get a co
 .venv\Scripts\python -m pytest -q
 ```
 
-247 tests, fully offline (everything's mocked — no real network calls, no GPU spin-up), runs in under 2 seconds. If the test suite ever takes suspiciously longer than that, something snuck a real network/model call into a unit test again. I've caught myself doing this more than once.
+258 tests, fully offline (everything's mocked — no real network calls, no GPU spin-up), runs in under 2 seconds. If the test suite ever takes suspiciously longer than that, something snuck a real network/model call into a unit test again. I've caught myself doing this more than once.
 
 **Live integration tests.** `tests/test_live_integration.py` holds a handful of tests marked `@pytest.mark.live` that hit the real thing instead of mocks — a real Playwright/Chromium fetch of `example.com`, a real GitHub API call, a real YouTube API call (skipped cleanly if no key is configured). `pytest.ini` excludes them by default (`addopts = -m "not live"`), so they never run in CI and never slow down the offline suite above. Run them explicitly with:
 
@@ -198,7 +198,7 @@ Or in the browser: start the server (see Setup) and open `http://localhost:8123/
 - **Keys (optional, in `.env`)**: `BRAVE_API_KEY` adds Brave to search; `YOUTUBE_API_KEY` gets full upload history (otherwise RSS, latest 15); `CONTACT_URL` is required by Wikimedia's API rules and is sent only to Wikimedia.
 - **Cache**: web search results are kept 24 h and Wikidata 30 days in `data/app.db`, so a repeat run skips resolve + search (seconds instead of a minute) and stops tripping DuckDuckGo's throttle. Throttled or errored searches are never cached. `--fresh` (or the page checkbox) ignores the cache for one run. News, feeds and link checks are always live.
 - **`--url`** pins the company by its website on Wikidata ("Gemini" + gemini.com → the crypto exchange, not the constellation or the Google model). A Wikidata match with no website is not trusted when `--url` is given. If the plain name means something else on Wikidata, the report says so; add `--context <word>` (or the page's *Context word* field) to require that word in news and search: `python -m backend.company "Gemini" --url https://www.gemini.com --context crypto`.
-- **Categories** under 5% of the top category's Wikipedia pageviews are skipped (Netflix → no Millarworld / Albuquerque Studios): nobody writes "vs" pages about them.
+- **Categories** under 5% of the top category's Wikipedia pageviews are skipped (Netflix → no Millarworld / Albuquerque Studios): nobody writes "vs" pages about them. A company with subsidiaries but no products on Wikidata (Capgemini → Sogeti, Accenture, Tesla) is searched as itself ("Capgemini vs"), like a startup; with `--context`, those results must also contain the context word.
 - **Speed**: ~30 s with `--competitors`; first search run ~45-110 s (DuckDuckGo, ~13 s per category); repeat runs ~20-30 s.
 - **Limits**: without `BRAVE_API_KEY`, DuckDuckGo alone returns ~8-20 results per query, so smaller categories often end with no medium-confidence competitor; DuckDuckGo throttles repeated runs; Google News links are redirect wrappers; Medium feeds give the latest 10 posts; the AI filter is a keyword list, not a classifier.
 

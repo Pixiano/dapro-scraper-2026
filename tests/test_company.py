@@ -543,6 +543,19 @@ def test_startup_results_must_name_company():
     assert not cp._relevant({"title": "Multiverse vs Coursera", "url": "https://b.com",
                              "snippet": "Apprenticeship edtech"}, cat)
     assert cp._relevant({"title": "Rivals", "url": "https://multiversecomputing.com/x"}, cat)
+    gem = {"label": "Gemini", "self": True, "context": "crypto", "site": "gemini.com"}
+    assert not cp._relevant({"title": "Gemini vs Claude", "url": "https://c.com"}, gem)
+    assert cp._relevant({"title": "Gemini vs Coinbase", "url": "https://d.com",
+                         "snippet": "best cryptocurrency exchanges"}, gem)
+
+
+def test_subsidiaries_only_searches_company_itself(monkeypatch):
+    ents = {"QC": _ent("QC", "Capgemini", P355=[_claim("QS")]),
+            "QS": _ent("QS", "Sogeti", "Sogeti")}
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {i: ents[i] for i in ids if i in ents})
+    monkeypatch.setattr(wd, "pageviews", lambda t, e, today=None: 100)
+    monkeypatch.setattr(wd, "search", lambda n, e, **k: "QC")
+    assert wd.resolve("CapGemini")["categories"] == []
 
 
 def test_minor_categories_dropped_and_shared_name_pinned(monkeypatch):

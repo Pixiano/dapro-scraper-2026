@@ -223,10 +223,14 @@ def _queries(cat: dict) -> list[str]:
 
 
 def _relevant(r: dict, cat: dict) -> bool:
-    """Self mode: the result must name the company in full or point at its domain."""
+    """Self mode: the result must point at the company's domain, or name it in full
+    (and the context word, if given: "Gemini vs Claude" is not about the exchange)."""
     text = f" {_norm(r['title'] + ' ' + (r.get('snippet') or ''))} "
-    site = cat.get("site")
-    return f" {_norm(cat['label'])} " in text or bool(site and site in r["url"].lower())
+    site, ctx = cat.get("site"), cat.get("context")
+    if site and site in r["url"].lower():
+        return True
+    # word-start match: "crypto" also keeps "cryptocurrency"
+    return f" {_norm(cat['label'])} " in text and (not ctx or f" {_norm(ctx)}" in text)
 
 
 def _fold_owned(ms: list[dict]) -> list[dict]:
