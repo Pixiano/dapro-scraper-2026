@@ -3,6 +3,7 @@
 import json
 import re
 import time
+import unicodedata
 from collections.abc import Callable
 from datetime import date
 
@@ -43,6 +44,9 @@ def run(name: str, url: str | None = None, categories: int = 5, per_category: in
     t2 = time.perf_counter()
     say(f"3/5 collect      news, blogs, YouTube for {1 + len(comps['overall'])} companies")
     data = collect.collect(company, comps["overall"], social=social)
+    if not data["company"]["items"]:
+        say(f"               nothing found for {name!r}: check the spelling"
+            + ("" if url else " or add --url https://..."))
     t3 = time.perf_counter()
 
     out_dir = OUT / slug(company["label"]) / date.today().isoformat()
@@ -67,4 +71,5 @@ def run(name: str, url: str | None = None, categories: int = 5, per_category: in
 
 
 def slug(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()  # Nestlé -> nestle
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") or "company"

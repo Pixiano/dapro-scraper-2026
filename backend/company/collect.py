@@ -256,10 +256,14 @@ def entity(e: dict, bounds, social: bool = False) -> dict:
     ctx = e.get("context") or ""  # "crypto": required extra word for a shared name
     items = (hacker_news(name, bounds, errors, ctx) + google_news(name, bounds, errors, ctx)
              + blog_items + youtube_videos(links.get("youtube"), bounds, errors))
-    seen, uniq = set(), []
+    seen: set = set()
+    uniq = []
     for it in items:
-        if it["url"] not in seen:
-            seen.add(it["url"])
+        # news: the same article comes back under a second redirect URL
+        same = (it["source"], it["title"].casefold()) if it["source"] in (
+            "google_news", "hacker_news") else it["url"]
+        if it["url"] not in seen and same not in seen:
+            seen.update((it["url"], same))
             uniq.append(it)
     return {"label": e["label"], "searched_as": name, "qid": e.get("qid"), "links": links,
             "blog_feed": feed, "social": social_mod.profiles(links) if social else None,

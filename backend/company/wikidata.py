@@ -52,7 +52,9 @@ def _fetch(url: str, errors: list[str], params: dict) -> dict:
         return {}
 
 
-COMPANY = re.compile(r"\b(company|corporation|conglomerate|organi[sz]ation|enterprise|"
+# "network": Deloitte is a "professional services network"; without it the search
+# fell through to "Deloitte Netherlands" (described as "company")
+COMPANY = re.compile(r"\b(company|corporation|conglomerate|organi[sz]ation|enterprise|network|"
                      r"firm|manufacturer|developer|publisher|studio|brand|startup)\b", re.I)
 
 
@@ -79,12 +81,15 @@ def by_website(url: str, errors: list[str]) -> str | None:
     """Item whose official website (P856) is this host: pins "Gemini" + gemini.com
     to the exchange, not the constellation. ponytail: 4 spelling variants only."""
     h = urlparse(url if "//" in url else "https://" + url).netloc.lower().removeprefix("www.")
+    hits: list[str] = []
     for u in (f"https://www.{h}", f"https://{h}", f"https://www.{h}/", f"https://{h}/"):
-        data = _get(API, errors, action="query", list="search", srlimit=1, format="json",
+        data = _get(API, errors, action="query", list="search", srlimit=5, format="json",
                     srsearch=f"haswbstatement:P856={u}")
-        if hits := (data.get("query") or {}).get("search"):
-            return hits[0]["title"]
-    return None
+        hits += [x["title"] for x in (data.get("query") or {}).get("search") or []]
+    # several items share a site (Gemini the exchange, and its EU arm): the one with
+    # an English Wikipedia page is the company people mean
+    ents = get_entities(hits, errors) if len(hits) > 1 else {}
+    return next((q for q in hits if enwiki(ents.get(q) or {})), hits[0] if hits else None)
 
 
 def get_entities(ids: list[str], errors: list[str]) -> dict[str, dict]:
@@ -130,7 +135,9 @@ def links(ent: dict) -> dict[str, str | None]:
     out: dict[str, str | None] = {}
     for pid, (key, tmpl) in LINKS.items():
         vals = claim_values(ent, pid)
-        out[key] = (tmpl.format(vals[0]) if tmpl else vals[0]) if vals else None
+        # URLs: the shortest path wins (apple.com/, not the Austrian apple.com/at/)
+        out[key] = (tmpl.format(vals[0]) if tmpl else
+                    min(vals, key=lambda u: len(urlparse(u).path.strip("/")))) if vals else None
     return out
 
 
@@ -151,9 +158,22 @@ def pageviews(title: str, errors: list[str], today: date | None = None) -> int:
 def is_generic(ent: dict) -> bool:
     """ponytail: P279 (subclass-of) without a manufacturer/developer (P176/P178)
     marks generic classes like "smartphone"; product lines (iPhone, Windows)
-    carry P279 too but name their maker. Heuristic."""
+    carry P279 too but name their maker. Heuristic. Disambiguation pages
+    (TCS lists "Integration" as a product) are never a thing at all."""
+    if "Q4167410" in claim_values(ent, "P31"):
+        return True
     return bool(claim_values(ent, "P279")) and not (claim_values(ent, "P176")
                                                     or claim_values(ent, "P178"))
+
+
+def is_business(ent: dict) -> bool:
+    """A company, brand or product, not a band, a surname or a US state: its
+    description says so, or it carries business facts (industry, products, maker,
+    developer, stock listing). ponytail: heuristic; extend COMPANY when a real
+    rival is turned away."""
+    desc = (ent.get("descriptions") or {}).get("en", {}).get("value") or ""
+    return bool(COMPANY.search(desc)) or any(
+        claim_values(ent, p) for p in ("P452", "P1056", "P176", "P178", "P414"))
 
 
 def base_name(s: str) -> str:

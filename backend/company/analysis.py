@@ -32,6 +32,8 @@ Rules:
   product, partner or person you name must appear in one of the headlines you cite.
 - Use no number that is not written in the facts (no amounts, dates or percentages from memory).
 - No outside knowledge: if the facts do not show it, do not say it.
+- Say only what a headline says happened. A comparison, a ranking or a mention in a
+  headline is not something the company did or launched.
 - Compare what the headlines cover; do not say one company "leads" or is "better"
   unless a cited headline says so.
 - confidence: high = stated directly by several sources; medium = one source or a clear

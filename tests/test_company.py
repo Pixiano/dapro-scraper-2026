@@ -19,8 +19,9 @@ def _claim(pid_val, rank="normal", kind="id"):
     return {"rank": rank, "mainsnak": {"datavalue": {"value": v}}}
 
 
-def _ent(qid, lbl, enwiki=None, **claims):
+def _ent(qid, lbl, enwiki=None, desc="software company", **claims):
     return {"id": qid, "labels": {"en": {"value": lbl}},
+            "descriptions": {"en": {"value": desc}},
             "sitelinks": {"enwiki": {"title": enwiki}} if enwiki else {},
             "claims": claims}
 
@@ -199,7 +200,7 @@ def test_own_product_label_filtered_even_with_other_qid(monkeypatch):
 def test_discover_strips_company_prefix_from_own_labels(monkeypatch):
     seen = {}
     monkeypatch.setattr(cp, "for_category",
-                        lambda cat, own, names, n, e: seen.setdefault("names", names) and {
+                        lambda cat, own, names, n, e, *a: seen.setdefault("names", names) and {
                             "category": "x", "competitors": []})
     cp.discover({"categories": [{"qid": "Q"}], "own_names": ["Microsoft"],
                  "own_labels": ["Microsoft Bing", "Xbox"]})
@@ -257,7 +258,15 @@ def test_by_website_tries_spellings(monkeypatch):
     seen = []
     monkeypatch.setattr(wd, "_get", lambda url, e, **p: seen.append(p["srsearch"]) or (
         {"query": {"search": [{"title": "QG"}]}} if p["srsearch"].endswith("//gemini.com") else {}))
-    assert wd.by_website("gemini.com/", []) == "QG" and len(seen) == 2
+    assert wd.by_website("gemini.com/", []) == "QG" and len(seen) == 4
+    # two items share the site (the exchange and its EU arm): the one with an
+    # English Wikipedia page is the company
+    monkeypatch.setattr(wd, "_get", lambda url, e, **p: (
+        {"query": {"search": [{"title": "QEU"}, {"title": "QG"}]}}
+        if p["srsearch"].endswith("//gemini.com") else {}))
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {
+        "QEU": _ent("QEU", "Gemini EU"), "QG": _ent("QG", "Gemini", "Gemini (exchange)")})
+    assert wd.by_website("gemini.com", []) == "QG"
 
 
 # ---- Phase 3: collect ----
@@ -332,14 +341,57 @@ def test_ai_terms_strips_entity_name():
     assert ai_terms("Said to be detailed", None) == []  # "ai" inside words is not AI
 
 
-def test_outlook_run_rate():
+def test_outlook_scales_by_headline_volume():
     from backend.company.report import outlook, quarter_end
-    assert quarter_end(date(2026, 10, 1)) == date(2027, 1, 1)
-    o = outlook(last=40, to_date=23, q_start=date(2026, 10, 1), today=date(2026, 11, 15))
+    q, day = date(2026, 10, 1), date(2026, 11, 15)
+    assert quarter_end(q) == date(2027, 1, 1)
+    # Capgemini's real numbers: 48 AI of 107 headlines so far vs 41 of 104. By days
+    # that read "up ~94"; by share of headlines it is 47 vs 41: flat
+    o = outlook(41, 48, 104, 107, q, day)
     assert o["elapsed_days"] == 46 and o["quarter_days"] == 92
-    assert o["projection"] == 46 and o["trend"] == "flat"
-    assert outlook(10, 20, date(2026, 10, 1), date(2026, 11, 15))["trend"] == "up"
-    assert outlook(0, 0, date(2026, 10, 1), date(2026, 10, 2))["trend"] == "none"
+    assert o["projection"] == 47 and o["trend"] == "flat"
+    assert outlook(10, 20, 100, 100, q, day)["trend"] == "up"
+    assert outlook(10, 4, 100, 100, q, day)["trend"] == "down"
+    assert outlook(0, 3, 0, 9, q, day)["trend"] == "new"  # no last quarter to scale to
+    assert outlook(0, 0, 0, 0, q, date(2026, 10, 2))["trend"] == "none"
+
+
+def test_rules_from_the_scenario_runs(monkeypatch):
+    """One case per wrong pick the live scenarios turned up."""
+    from backend.company.report import ai_terms
+    # a court case is not a comparison; a headline about the company is not a rival
+    assert cp.names_from_title("Williams v. Gerber Products Company") == []
+    monkeypatch.setattr(cp, "web_search", lambda q, e: [
+        {"title": t, "url": f"https://{d}/{t}", "engine": "ddgs"} for t, d in [
+            ("iPad vs These Tablets Beat Apple", "a.com"), ("iPad vs These Tablets Beat Apple", "b.com"),
+            ("iPad vs Laptop", "a.com"), ("iPad vs Laptop", "b.com"), ("iPad vs Laptop", "c.com"),
+            ("iPad vs ChatPad", "a.com"), ("iPad vs ChatPad", "b.com"),
+            ("iPad vs The Chainsmokers", "a.com"), ("iPad vs The Chainsmokers", "b.com")]])
+    ents = {"QL": _ent("QL", "laptop", "Laptop", desc="foldable computer", P279=[_claim("QC")]),
+            "QB": _ent("QB", "The Chainsmokers", "The Chainsmokers", desc="American music duo"),
+            "QP": _ent("QP", "ChatPad", "ChatPad", desc="tablet", P178=[_claim("QO")]),
+            "QO": _ent("QO", "OpenPad", "OpenPad", desc="American company")}
+    monkeypatch.setattr(wd, "search", lambda n, e, **k: {
+        "Laptop": "QL", "Chainsmokers": "QB", "ChatPad": "QP"}.get(n))
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {i: ents[i] for i in ids if i in ents})
+    r = cp.for_category({"qid": "QI", "label": "iPad", "enwiki": "iPad"}, {"QA"}, ["apple"], 3,
+                        [], core=("apple",))
+    # the product is listed under its maker; a generic word and a band stay low
+    assert [(c["label"], c["via"], c["name"], c["confidence"]) for c in r["competitors"]] == [
+        ("OpenPad", ["ChatPad"], "OpenPad", "medium")]
+    assert {(c["label"], c["confidence"]) for c in r["appendix"]} == {
+        ("Laptop", "low"), ("Chainsmokers", "low")}  # the headline is gone altogether
+    assert wd.is_generic(_ent("QD", "Integration", "Integration", P31=[_claim("Q4167410")]))
+    assert wd.links(_ent("Q", "Apple", P856=[_claim("https://apple.com/at/", "normal", "str"),
+                                             _claim("https://www.apple.com/", "normal", "str")])
+                    )["website"] == "https://www.apple.com/"
+    # the exchange named Gemini: headlines about Google's model are not its AI news
+    for t in ("Google says Gemini is helping design its own AI chips",
+              "Revolut X Adds AI Trading via Claude, Gemini Prompts",
+              "Google Launches Gemini 4 Carbon with Advanced AI Capabilities"):
+        assert ai_terms(t, "Gemini") == [], t
+    assert ai_terms("Gemini exchange launches an AI trading agent", "Gemini") == ["ai"]
+    assert ai_terms("Google Launches Gemini 4 Carbon", "Google") == ["gemini"]  # Google's own
 
 
 def test_top_round_robin():

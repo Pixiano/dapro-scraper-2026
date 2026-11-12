@@ -19,7 +19,8 @@ RESULTS = 20          # per engine per query
 MAX_NAMES = 15        # candidate names verified per category (bounds Wikidata calls)
 AD_HOSTS = ("bing.com", "duckduckgo.com", "googleadservices.com", "doubleclick.net")
 
-VS = re.compile(r"\s+(?:vs\.?|versus|v\.)\s+", re.I)
+# no "v.": that is a court case ("Williams v. Gerber Products"), not a comparison
+VS = re.compile(r"\s+(?:vs\.?|versus)\s+", re.I)
 SEP = re.compile(r"\s+[-–—|]\s+|[:?!()\[\]|,;]")
 _last_brave = 0.0
 
@@ -207,9 +208,25 @@ def _verify(names: list[str], own: set[str], own_names: list[str],
             own_hit.add(n)
             continue
         human = "Q5" in wd.claim_values(e, "P31")  # "Zapata" -> Emiliano Zapata
-        if wd.enwiki(e) and not wd.is_generic(e) and not human:
+        if wd.enwiki(e) and not wd.is_generic(e) and not human and wd.is_business(e):
             out[n] = e
     return out, own_hit
+
+
+def _roll_up(verified: dict[str, dict], errors: list[str]) -> dict[str, tuple[dict, str | None]]:
+    """name -> (entity to list, product it was found as). A product is listed under
+    the company that develops or makes it (ChatGPT -> OpenAI, Android -> Google):
+    the report compares companies. Kept as itself when the maker has no English
+    Wikipedia page or is not a business."""
+    maker = {n: next(iter(wd.claim_values(e, "P178") + wd.claim_values(e, "P176")), None)
+             for n, e in verified.items()}
+    ents = wd.get_entities(sorted({q for q in maker.values() if q}), errors)
+    out: dict[str, tuple[dict, str | None]] = {}
+    for n, e in verified.items():
+        o = ents.get(maker[n] or "")
+        ok = o and wd.enwiki(o) and wd.is_business(o)
+        out[n] = (o, wd.label(e)) if o and ok else (e, None)
+    return out
 
 
 def _queries(cat: dict) -> list[str]:
@@ -255,7 +272,8 @@ def _fold_owned(ms: list[dict]) -> list[dict]:
 
 
 def for_category(cat: dict, own: set[str], own_names: list[str], per_category: int,
-                 errors: list[str]) -> dict:
+                 errors: list[str], core: tuple[str, ...] = ()) -> dict:
+    """core: the company's own names ("alphabet", "google"), without its products."""
     queries = _queries(cat)
     seen, results = set(), []
     for q in queries:
@@ -280,7 +298,10 @@ def for_category(cat: dict, own: set[str], own_names: list[str], per_category: i
                       if n not in found]
         for n in found:
             flat = _norm(n).replace(" ", "")
-            if _norm(n) in skip or any(_norm(n).startswith(o + " ") for o in skip) or any(
+            # an own name inside a longer phrase is a headline about the company
+            # ("These Tablets Beat Apple"), not a rival
+            if any(f" {o} " in f" {_norm(n)} " for o in core) or \
+                    _norm(n) in skip or any(_norm(n).startswith(o + " ") for o in skip) or any(
                     o.endswith(" " + _norm(n)) for o in skip) or any(  # "Computing" of "Multiverse Computing"
                     len(flat) >= 4 and o.replace(" ", "").startswith(flat) for o in skip):
                 # last rule: "Adaption" is just the start of "AdaptionAI"
@@ -292,12 +313,14 @@ def for_category(cat: dict, own: set[str], own_names: list[str], per_category: i
                                          "engine": r["engine"]})
     names = sorted(by_name, key=lambda n: -len(by_name[n]["domains"]))[:MAX_NAMES]
     verified, own_hit = _verify(names, own | {cat["qid"]} - {None}, own_names, errors)
+    rolled = _roll_up(verified, errors)
 
     merged: dict[str, dict] = {}  # by QID: "Azure" and "Microsoft Azure" are one
     for n in names:
         if n in own_hit:
             continue
-        e = verified.get(n)
+        found_as = verified.get(n)  # the product named in the title
+        e, via = rolled.get(n, (None, None))
         if e is None and len(by_name[n]["domains"]) < 2:
             continue  # unverified + single source = noise (GrubMarket)
         key = e["id"] if e else "name:" + _norm(n)
@@ -309,16 +332,20 @@ def for_category(cat: dict, own: set[str], own_names: list[str], per_category: i
             "links": wd.links(e) if e else {}, "matched_names": [],
             # >2 owners = a public company's shareholder list, useless for merging
             "owners": sorted(makers) if len(makers) <= 2 else [],
-            "off_class": bool(e and classes and not set(wd.claim_values(e, "P31")) & classes),
+            "off_class": bool(found_as and classes
+                              and not set(wd.claim_values(found_as, "P31")) & classes),
             "domains": set(), "evidence": []})
+        if via:  # news is collected for the maker, not the product
+            m["name"] = wd.base_name(m["label"])
+            m["via"] = sorted({*m.get("via", []), via})
         m["matched_names"].append(n)
         m["domains"] |= by_name[n]["domains"]
         m["evidence"] += [x for x in by_name[n]["evidence"] if x not in m["evidence"]][:5]
     rank = lambda m: (-len(m["domains"]), not m["on_wikidata"])  # noqa: E731
     comps = sorted(_fold_owned(sorted(merged.values(), key=rank)), key=rank)
     for m in comps:
-        c = confidence(len(m["domains"]))
-        c = c if m["on_wikidata"] else _down(c)
+        # not confirmed as a business on Wikidata ("Laptop", a headline): never above low
+        c = confidence(len(m["domains"])) if m["on_wikidata"] else "low"
         m["confidence"] = _down(c) if m["off_class"] else c
         m["domains"] = sorted(m["domains"])
     main = [m for m in comps if m["confidence"] != "low"]
@@ -338,11 +365,12 @@ def overall(per_cat: list[dict], top: int) -> list[dict]:
             a["categories"].append(c["category"])
             a["domains"] = sorted(set(a["domains"]) | set(m["domains"]))
             a["off_class"] = a.get("off_class") and m.get("off_class")  # on-class anywhere wins
+            if m.get("via"):
+                a["via"] = sorted({*a.get("via", []), *m["via"]})
     rank = lambda a: (-len(a["categories"]), -len(a["domains"]))  # noqa: E731
     ranked = sorted(_fold_owned(sorted(agg.values(), key=rank)), key=rank)
     for a in ranked:
-        conf = confidence(len(a["domains"]))
-        conf = conf if a.get("on_wikidata", True) else _down(conf)
+        conf = confidence(len(a["domains"])) if a.get("on_wikidata", True) else "low"
         a["confidence"] = _down(conf) if a.get("off_class") else conf
     return ranked[:top]
 
@@ -392,17 +420,24 @@ def discover(company: dict, per_category: int = 3, top: int = 10,
                 "errors": errors}
     own = set(company.get("own_entities") or [])
     own_names = [_norm(x) for x in (company.get("own_names") or []) if x]
+    core = tuple(o for o in own_names if o)
     labels = [_norm(x) for x in (company.get("own_labels") or []) if x]
     # "Microsoft Bing" is also just "Bing"
     own_names += labels + [lb[len(o) + 1:] for lb in labels for o in own_names
                            if lb.startswith(o + " ")]
-    cats = company.get("categories") or []
-    if not cats:  # startup or not on Wikidata: the company is its own category
-        cats = [{"qid": company.get("qid"), "enwiki": None, "self": True,
-                 "label": company.get("search_name") or company.get("label") or company["query"],
-                 "context": company.get("context"),
-                 "site": domain((company.get("links") or {}).get("website") or "") or None}]
-    per_cat = [for_category(c, own, own_names, per_category, errors) for c in cats]
-    return {"mode": "search" if company.get("categories") else "search-self",
+    # Always search the company itself ("Alphabet competitors"): product searches
+    # alone find product rivals (map apps) and miss the company's direct rivals.
+    # For a startup or a company without product lines it is the only category.
+    me = company.get("search_name") or wd.base_name(
+        company.get("label") or company.get("query") or "")
+    cats = [*(company.get("categories") or []),
+            *([{"qid": company.get("qid"), "enwiki": None, "self": True, "label": me,
+                "context": company.get("context"),
+                "site": domain((company.get("links") or {}).get("website") or "") or None}]
+              if me else [])]
+    # direct rivals are the point of the report: that list may fill the whole top
+    per_cat = [for_category(c, own, own_names, top if c.get("self") else per_category, errors,
+                            core) for c in cats]
+    return {"mode": "search" if company.get("categories") else "search-self", "top": top,
             "engines_configured": ["brave"] * bool(settings.brave_api_key) + ["ddgs"],
             "per_category": per_cat, "overall": overall(per_cat, top), "errors": errors}

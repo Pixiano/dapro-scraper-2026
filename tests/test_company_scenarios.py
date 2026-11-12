@@ -87,6 +87,8 @@ def inspect(argv: list[str], md: str, raw: dict, log: str) -> dict:
         p.append("scorecard rows do not match the competitor list")
 
     for flag, mark in (("--no-analysis", "## Summary (analysis)"), ("--no-vision", "## Vision notes")):
+        if "model analysis was skipped" in md and flag == "--no-analysis":
+            continue  # no AI headlines: nothing to analyse, and the report says so
         if (flag in argv) == (mark in md):
             p.append(f"{mark!r} {'present despite' if flag in argv else 'missing without'} {flag}")
     if "Done in" not in log or len(re.findall(r"\] \d/5 ", log)) != 5:
