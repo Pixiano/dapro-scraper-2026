@@ -383,7 +383,8 @@ def test_build_report_pdf(tmp_path, monkeypatch):
                            "published": "2026-08-01", "quarter": qq, "points": 30}
     ent = lambda n, items: {"label": n, "searched_as": n, "links": {}, "items": items,  # noqa
                             "errors": []}
-    raw = {"company": {"label": "Acme", "wikidata_url": None},
+    raw = {"company": {"label": "Acme", "wikidata_url": None,
+                       "categories": [{"qid": "Q1", "label": "chips"}]},  # dicts: crashed once
            "competitors": {"mode": "user", "overall": [{"label": "Rival", "evidence": []}]},
            "collected": {"quarters": q, "company": ent("Acme", [it("Acme AI chip", "u1", "Q3 2026")]),
                          "competitors": [ent("Rival", [it("Rival LLM [beta]", "u2", "Q3 2026"),

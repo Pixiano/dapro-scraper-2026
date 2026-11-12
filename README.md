@@ -210,6 +210,8 @@ Or in the browser: start the server (see Setup) and open `http://localhost:8123/
 
 Live test (real network, ~20 s): `.venv\Scripts\python -m pytest -m live -k company`
 
+Scenario suite (real network + local models, ~15 min): `.venv\Scripts\python -m pytest -m live tests/test_company_scenarios.py` runs the real CLI for one general case and 15 variants (named rivals, startup, context word, each flag, odd names) into `data/scenarios/<name>/`, checks every report against the same rules (citations, duplicates, flags, competitor list) and leaves `cli.log` + `result.json` per scenario. A scenario finished today is not rerun.
+
 ---
 
 ## API surface, for the curious / the automators

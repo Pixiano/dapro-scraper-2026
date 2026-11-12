@@ -211,7 +211,9 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
     secs, facts = [], []  # per-company sections (assigns [n]) and the model's fact sheet
     for n, (e, m, a, p) in enumerate(rows):
         o = a["outlook"]
-        cats = ["direct rival" if c in own else c for c in m.get("categories") or []]
+        # rivals only: the company's own "categories" are Wikidata dicts, not names
+        cats = ["direct rival" if c in own else c
+                for c in (m.get("categories") or [] if n else [])]
         head = [f"## {_t(e['label'])} (the company)" if n == 0 else f"## {n}. {_t(e['label'])}"]
         if n and not cats:
             head.append("- **Competes in**: named by you (`--competitors`)")
@@ -305,7 +307,9 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
     md.append("|---|---|---|---|---|---|---|")
     for n, (e, m, a, _) in enumerate(rows):
         o = a["outlook"]
-        cats = ["direct rival" if c in own else c for c in m.get("categories") or []]
+        # rivals only: the company's own "categories" are Wikidata dicts, not names
+        cats = ["direct rival" if c in own else c
+                for c in (m.get("categories") or [] if n else [])]
         where = "(the company)" if n == 0 else _t(", ".join(cats) or "named by you")
         md.append(f"| {n or '-'} | {_t(e['label'])} | {where} | "
                   f"{_b(m['confidence']) if n and m.get('confidence') in TAGS else '-'} | "
