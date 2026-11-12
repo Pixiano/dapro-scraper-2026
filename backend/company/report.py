@@ -198,12 +198,13 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
         return f"[{srcs.setdefault(url, (len(srcs) + 1, title, kind))[0]}]"
 
     def did(i: dict) -> str:
+        """One vertical-timeline entry: '~ date|mark|sentence' (the PDF draws the dot)."""
         pts = f", {i['points']} points" if i.get("points") else ""
         refs = cite(i["url"], _t(i["title"]), SRC[i["source"]])
         if i.get("link") in alive:
             refs += cite(i["link"], _t(i["title"]), "linked article")
-        return (f"- {_d(i['published'])} · {_t(i['title'])} · *{SRC[i['source']]}{pts}* "
-                f"{_b(i['confidence'])} {refs}")
+        return (f"~ {_d(i['published'])}|{KIND.get(i['source'], 'first')}|{_t(i['title'])} · "
+                f"*{SRC[i['source']]}{pts}* {_b(i['confidence'])} {refs}")
 
     rows = list(zip(ents, metas, an, picks))
     own = {company.get("label"), company.get("search_name")}
@@ -229,16 +230,13 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
             f"{lb} {a['counts'][lb]}/{a['total'][lb]}" for lb in labels))
         did_last = [i for i in p[last] if i["url"] in alive][:TOP]
         so_far = [i for i in p[cur] if i["url"] in alive][:3]
-        body = [f"### What they did in AI in {last}"]
-        body += [did(i) for i in did_last] or ["- no AI headlines found"]
-        if so_far:
-            body += [f"### So far in {cur}"] + [did(i) for i in so_far]
-        dated = [i for i in did_last + so_far if i.get("published")]
-        if len(dated) > 3:  # a series: show it on a timeline above the lists
-            body[:0] = [f"### Timeline: {last} to today",
-                        f"@@timeline {quarters[1]['start']} {today} | " + ", ".join(
-                            f"{i['published'][:10]}:{srcs[i['url']][0]}:"
-                            f"{KIND.get(i['source'], 'first')}" for i in dated)]
+        # one vertical timeline, oldest first, a label row where the quarter changes
+        body = [f"### What they did in AI: {last} to today"]
+        if not did_last:
+            body.append(f"- no AI headlines found for {last}")
+        for q, its in ((last, did_last), (cur, so_far)):
+            if its:
+                body += [f"~ # {q}"] + [did(i) for i in sorted(its, key=lambda i: i["published"] or "")]
         rule = [f"- **Activity (rule)**: {_b(o['trend'])}, run-rate ~{o['projection']} AI items "
                 f"vs {o['last']} in {last} · confidence {_b(o['confidence'])}",
                 f"- **Likely focus (rule)**: {focus(a, last, cur)}"]

@@ -9,18 +9,16 @@ picked up by the vision stage). Emoji are stripped — no embeddable PDF font
 renders colour emoji, so they would otherwise show as empty boxes."""
 
 import re
-from datetime import date
 from pathlib import Path
 
-from reportlab.graphics.shapes import Circle, Drawing, Line, Rect, String
-from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.pdfmetrics import registerFontFamily
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import (HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table,
+from reportlab.platypus import (Flowable, HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table,
                                 TableStyle)
 
 _FONTS = r"C:\Windows\Fonts"
@@ -147,7 +145,9 @@ def render_markdown_pdf(markdown: str, out_path: Path, title: str, bw: bool = Fa
     rows: list[list[str]] = []
     quote: list[str] = []
     warn = False
-    for raw in markdown.split("\n") + [""]:
+    lines = markdown.split("\n") + [""]
+    for k, raw in enumerate(lines):
+        nxt = lines[k + 1].strip() if k + 1 < len(lines) else ""
         line = raw.rstrip()
         s = line.strip()
         if s.startswith("|"):  # Markdown table row: buffer until the table ends
@@ -168,8 +168,12 @@ def render_markdown_pdf(markdown: str, out_path: Path, title: str, bw: bool = Fa
             quote = []
         if not s:
             continue
-        if s.startswith("@@timeline"):
-            flow += _timeline(s, family)
+        if s.startswith("~ "):  # vertical timeline row; legend after the last one
+            flow.append(_step(s, styles["body"]))
+            if not nxt.startswith("~ "):
+                flow += [Spacer(1, 3), Paragraph(LEGEND.format(**_P), ParagraphStyle(
+                    "lg", fontName=family, fontSize=7.5, leading=10, textColor=_P["axis"],
+                    spaceAfter=6))]
         elif s.startswith("# "):
             flow.append(Paragraph(_inline(s[2:]), styles["title"]))
             flow.append(HRFlowable(width="100%", thickness=1.2, color="#dfe4ee",
@@ -239,70 +243,63 @@ def _box(lines: list[str], warn: bool, body: ParagraphStyle) -> Table:
     return t
 
 
-def _mark(x: float, y: float, kind: str) -> list:
-    """Source kind -> shape, so B&W still tells them apart:
-    first-party = filled circle, news = hollow circle, Hacker News = square."""
-    c = _P[kind]
-    if kind == "hn":
-        return [Rect(x - 3, y - 3, 6, 6, fillColor=c, strokeColor=c)]
-    return [Circle(x, y, 3.2, fillColor=c if kind == "first" else "#ffffff",
-                   strokeColor=c, strokeWidth=1.2)]
+class _Step(Flowable):
+    """One vertical-timeline row: date | line + dot | sentence. Rows stack with no
+    gap, so the line runs unbroken down the section; page breaks fall between rows.
+    head=True: a quarter label on the line instead of an item."""
+    DW, LX, TX = 64, 74, 86  # date width, line x, text x (points)
+
+    def __init__(self, date_txt: str, kind: str, text: str, body: ParagraphStyle,
+                 head: bool = False):
+        super().__init__()
+        small = ParagraphStyle("tld", parent=body, fontSize=8, leading=10,
+                               alignment=TA_RIGHT, textColor=_P["axis"])
+        self.date = Paragraph(_inline(date_txt).replace(" (", "<br/>("), small)
+        self.text = Paragraph(f"<b>{_inline(text)}</b>" if head else _inline(text),
+                              ParagraphStyle("tlh", parent=body, textColor=_P["h3"])
+                              if head else body)
+        self.kind, self.head = kind, head
+        self.keepWithNext = head  # a quarter label never ends a page alone
+
+    def wrap(self, aw: float, ah: float) -> tuple[float, float]:
+        _, self.hd = self.date.wrap(self.DW, ah)
+        _, self.ht = self.text.wrap(aw - self.TX, ah)
+        self.h = max(self.hd, self.ht) + (8 if self.head else 5)
+        return aw, self.h
+
+    def draw(self) -> None:
+        c, h, x = self.canv, self.h, self.LX
+        c.setStrokeColor(_P["axis"])
+        c.setLineWidth(1.2)
+        c.line(x, 0, x, h)
+        y = h - 7.5 - (3 if self.head else 0)  # centre of the first text line
+        col = _P["h3"] if self.head else _P[self.kind]
+        c.setStrokeColor(col)
+        c.setFillColor(col)
+        if self.head:  # quarter label: short tick across the line
+            c.setLineWidth(2)
+            c.line(x - 6, y, x + 6, y)
+        elif self.kind == "hn":
+            c.rect(x - 3.5, y - 3.5, 7, 7, fill=1)
+        else:  # own blog/YouTube filled, news hollow (B&W tells them apart)
+            c.setFillColor(col if self.kind == "first" else "#ffffff")
+            c.circle(x, y, 3.8, fill=1)
+        top = h - (3 if self.head else 0)
+        self.date.drawOn(c, 0, top - self.hd)
+        self.text.drawOn(c, self.TX, top - self.ht)
 
 
-def _timeline(spec: str, family: str) -> list:
-    """'@@timeline 2026-07-01 2026-11-12 | 2026-09-17:1:news, ...' -> drawing + legend.
-    Labels [n] stack into rows when dates are close.
-    ponytail: greedy row packing; fine for the ~10 items a section lists"""
-    head, _, body = spec.partition("|")
-    start, end = (date.fromisoformat(x) for x in head.split()[1:3])
-    pts = sorted((date.fromisoformat(d), n, k) for d, n, k
-                 in (t.strip().split(":") for t in body.split(",") if t.strip()))
-    w = A4[0] - 4 * cm
-    x0, x1 = 8, w - 8
-    span = max((end - start).days, 1)
+def _step(s: str, body: ParagraphStyle) -> _Step:
+    """'~ 17 Sep 2026 (3 days ago)|news|sentence' or '~ # Q3 2026' (quarter label)."""
+    s = s[1:].strip()
+    if s.startswith("#"):
+        return _Step("", "first", s.lstrip("# "), body, head=True)
+    d, kind, text = s.split("|", 2)
+    return _Step(d.strip(), kind.strip(), text.strip(), body)
 
-    def X(d: date) -> float:
-        return x0 + (x1 - x0) * min(max((d - start).days, 0), span) / span
-    ends: list[float] = []
-    placed = []
-    for d, n, k in pts:
-        x, half = X(d), 3.5 * len(n) + 6
-        r = next((i for i, e in enumerate(ends) if e < x - half), len(ends))
-        if r == len(ends):
-            ends.append(x + half)
-        else:
-            ends[r] = x + half
-        placed.append((x, r, n, k))
-    base = 20
-    dr = Drawing(w, base + 16 + 11 * max(len(ends), 1))
-    dr.add(Line(x0, base, x1, base, strokeColor=_P["axis"], strokeWidth=1))
-    m = date(start.year, start.month, 1)
-    while m <= end:
-        if m >= start:
-            q = m.month in (1, 4, 7, 10)
-            dr.add(Line(X(m), base - 3, X(m), base + (6 if q else 3),
-                        strokeColor=_P["axis"], strokeWidth=1.2 if q else 0.6))
-            dr.add(String(X(m) + 2, base - 11,
-                          f"Q{(m.month - 1) // 3 + 1} {m:%b}" if q else f"{m:%b}",
-                          fontName=family, fontSize=7, fillColor=_P["axis"]))
-        m = date(m.year + m.month // 12, m.month % 12 + 1, 1)
-    dr.add(String(x1, base - 11, "today", fontName=family, fontSize=7,
-                  fillColor=_P["axis"], textAnchor="end"))
-    for x, r, n, k in placed:
-        y = base + 11 + 11 * r
-        if r:
-            dr.add(Line(x, base, x, y - 3, strokeColor=_P["axis"], strokeWidth=0.4))
-        for s in _mark(x, base, k):
-            dr.add(s)
-        dr.add(String(x, y, f"[{n}]", fontName=family, fontSize=7, fillColor=_P[k],
-                      textAnchor="middle"))
-    legend = (f'<font color="{_P["first"]}">●</font> own blog / YouTube &nbsp; '
-              f'<font color="{_P["news"]}">○</font> news &nbsp; '
-              f'<font color="{_P["hn"]}">■</font> Hacker News &nbsp; · numbers are sources')
-    return [dr, Paragraph(legend, ParagraphStyle("lg", fontName=family, fontSize=7.5,
-                                                  leading=10, textColor=_P["axis"],
-                                                  spaceAfter=6))]
 
+LEGEND = ('<font color="{first}">●</font> own blog / YouTube &nbsp; '
+          '<font color="{news}">○</font> news &nbsp; <font color="{hn}">■</font> Hacker News')
 
 
 def _footer(canvas, doc) -> None:
