@@ -738,3 +738,21 @@ def test_cli_progress_and_summary(monkeypatch, tmp_path):
         "know the rivals", "startup or shared name", "slow, or low on memory", "few rivals found"]
     assert cli.tips({"competitors", "url", "no_vision"}, False) == []
     assert not any("BRAVE" in t for t in cli.tips(set(), True))
+
+
+def test_only_the_server_on_our_port_is_killed(monkeypatch):
+    from backend.llm import server
+    out = ("  Proto  Local Address   Foreign Address  State      PID\n"
+           "  TCP    127.0.0.1:8080  0.0.0.0:0        LISTENING  111\n"
+           "  TCP    127.0.0.1:8081  0.0.0.0:0        LISTENING  222\n"   # someone else's server
+           "  TCP    127.0.0.1:5000  9.9.9.9:8080     ESTABLISHED  333\n")
+    assert server._port_pids(out, 8080) == {"111"}
+    ran: list[list[str]] = []
+    alive = iter([True, False])
+    monkeypatch.setattr(server.settings, "llm_port", 8080)
+    monkeypatch.setattr(server, "_healthy", lambda: next(alive))
+    monkeypatch.setattr(server.subprocess, "run", lambda cmd, **k: (
+        ran.append(cmd), type("R", (), {"stdout": out})())[1])
+    server._kill_orphans()
+    assert [c for c in ran if c[0] == "taskkill"] == [
+        ["taskkill", "/F", "/PID", "111", "/FI", "IMAGENAME eq llama-server.exe"]]

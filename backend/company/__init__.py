@@ -1,4 +1,4 @@
-"""Company competitor mechanism — live sources only, no LLM. See docs/plans/PLAN-COMPANY.md."""
+"""Company competitor mechanism — live sources; local-model notes and analysis are optional. See docs/plans/PLAN-COMPANY.md."""
 
 from ..config import settings
 
