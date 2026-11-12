@@ -11,16 +11,39 @@ renders colour emoji, so they would otherwise show as empty boxes."""
 import re
 from pathlib import Path
 
-from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.pdfmetrics import registerFontFamily
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import (Flowable, HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table,
+                                TableStyle)
 
 _FONTS = r"C:\Windows\Fonts"
+PALETTES = {
+    "color": {"title": "#1c2330", "h2": "#2c3a52", "h3": "#33518f", "link": "#33518f",
+              "rule": "#dfe4ee", "head": "#eef1f7", "zebra": "#f8f9fc",
+              "high": "#1a7f37", "medium": "#b26a00", "low": "#7a828e",
+              "up": "#1a7f37", "down": "#c62828", "flat": "#5f6b7a", "new": "#1a7f37",
+              "none": "#7a828e", "box": "#eef4ff", "boxbar": "#5b8def",
+              "warn": "#fff5dc", "warnbar": "#e0a100",
+              "first": "#1a7f37", "news": "#3366cc", "hn": "#e8710a", "axis": "#9aa3b2"},
+    # B&W: greys only; words and shapes (filled/hollow/square, up/down arrows) carry meaning
+    "bw": {"title": "#000000", "h2": "#000000", "h3": "#333333", "link": "#000000",
+           "rule": "#bbbbbb", "head": "#e4e4e4", "zebra": "#f6f6f6",
+           "high": "#000000", "medium": "#444444", "low": "#888888",
+           "up": "#000000", "down": "#000000", "flat": "#666666", "new": "#000000",
+           "none": "#888888", "box": "#f2f2f2", "boxbar": "#666666",
+           "warn": "#f2f2f2", "warnbar": "#000000",
+           "first": "#000000", "news": "#000000", "hn": "#000000", "axis": "#888888"},
+}
+# {{high}} etc. in the Markdown -> coloured badge; symbols are WGL4 (Arial has them)
+TAGS = {"high": "● high", "medium": "● medium", "low": "○ low", "up": "▲ up",
+        "down": "▼ down", "flat": "► flat", "new": "+ new", "none": "– none"}
+# ponytail: module palette, set per render; fine while PDFs render one at a time
+_P = PALETTES["color"]
 _registered = False
 _have_arial = False
 _have_indic = False
@@ -82,11 +105,11 @@ def _styles(family: str) -> dict:
     def st(name, **kw):
         return ParagraphStyle(name, fontName=family, alignment=TA_LEFT, **kw)
     return {
-        "title": st("t", fontSize=19, leading=23, spaceAfter=4, textColor="#1c2330"),
-        "h2": st("h2", fontSize=14, leading=18, spaceBefore=12, spaceAfter=4,
-                 textColor="#2c3a52"),
-        "h3": st("h3", fontSize=12, leading=15, spaceBefore=8, spaceAfter=2,
-                 textColor="#33518f"),
+        "title": st("t", fontSize=19, leading=23, spaceAfter=4, textColor=_P["title"]),
+        "h2": st("h2", fontSize=14, leading=18, spaceBefore=12, spaceAfter=4, keepWithNext=1,
+                 textColor=_P["h2"]),
+        "h3": st("h3", fontSize=12, leading=15, spaceBefore=8, spaceAfter=2, keepWithNext=1,
+                 textColor=_P["h3"]),
         "body": st("b", fontSize=10.5, leading=15, spaceAfter=5),
         "bullet": st("bul", fontSize=10.5, leading=15, spaceAfter=3,
                      leftIndent=16, bulletIndent=4),
@@ -96,29 +119,62 @@ def _styles(family: str) -> dict:
 def _inline(s: str) -> str:
     """Markdown inline → reportlab mini-markup, XML-escaping text first."""
     s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
-               r'<a href="\2" color="#33518f">\1</a>', s)
+    # one level of balanced parens (Wikipedia "Foo_(bar)"); a raw " would end href=
+    s = re.sub(r"\[([^\]]+)\]\((https?://(?:[^()\s]|\([^()\s]*\))+)\)",
+               lambda m: f'<a href="{m[2].replace(chr(34), "%22")}" color="{_P['link']}">{m[1]}</a>',
+               s)
     s = re.sub(r"&lt;(https?://[^&\s]+)&gt;",
-               r'<a href="\1" color="#33518f">\1</a>', s)
+               rf'<a href="\1" color="{_P['link']}">\1</a>', s)
     s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
     s = re.sub(r"\*([^*]+)\*", r"<i>\1</i>", s)
     s = re.sub(r"`([^`]+)`", r'<font face="Courier">\1</font>', s)
-    return s
+    return re.sub(r"\{\{(\w+)\}\}", lambda m: f'<font color="{_P[m[1]]}"><b>{TAGS[m[1]]}</b></font>'
+                  if m[1] in TAGS else m[0], s)
 
 
-def render_markdown_pdf(markdown: str, out_path: Path, title: str) -> Path:
+def render_markdown_pdf(markdown: str, out_path: Path, title: str, bw: bool = False) -> Path:
+    """bw: black-and-white palette (print / photocopy friendly)."""
+    global _P
+    _P = PALETTES["bw" if bw else "color"]
     _register_fonts()
     markdown = _normalize(_EMOJI.sub("", markdown))
     family = _family(markdown)
     styles = _styles(family)
 
-    flow = []
-    for raw in markdown.split("\n"):
+    flow: list = []
+    rows: list[list[str]] = []
+    quote: list[str] = []
+    warn = False
+    lines = markdown.split("\n") + [""]
+    for k, raw in enumerate(lines):
+        nxt = lines[k + 1].strip() if k + 1 < len(lines) else ""
         line = raw.rstrip()
         s = line.strip()
+        if s.startswith("|"):  # Markdown table row: buffer until the table ends
+            rows.append([c.strip() for c in s.strip("|").split("|")])
+            continue
+        if rows:
+            flow.append(_table(rows, styles["body"]))
+            rows = []
+        if s.startswith(">"):  # "> " box, ">! " warning box; consecutive lines share one
+            if quote and warn != s.startswith(">!"):
+                flow += [_box(quote, warn, styles["body"]), Spacer(1, 6)]
+                quote = []
+            warn = s.startswith(">!")
+            quote.append(s.lstrip(">!").strip())
+            continue
+        if quote:
+            flow += [_box(quote, warn, styles["body"]), Spacer(1, 6)]
+            quote = []
         if not s:
             continue
-        if s.startswith("# "):
+        if s.startswith("~ "):  # vertical timeline row; legend after the last one
+            flow.append(_step(s, styles["body"]))
+            if not nxt.startswith("~ "):
+                flow += [Spacer(1, 3), Paragraph(LEGEND.format(**_P), ParagraphStyle(
+                    "lg", fontName=family, fontSize=7.5, leading=10, textColor=_P["axis"],
+                    spaceAfter=6))]
+        elif s.startswith("# "):
             flow.append(Paragraph(_inline(s[2:]), styles["title"]))
             flow.append(HRFlowable(width="100%", thickness=1.2, color="#dfe4ee",
                                    spaceBefore=3, spaceAfter=8))
@@ -143,6 +199,107 @@ def render_markdown_pdf(markdown: str, out_path: Path, title: str) -> Path:
         leftMargin=2 * cm, rightMargin=2 * cm, topMargin=1.8 * cm, bottomMargin=1.8 * cm)
     doc.build(flow, onLaterPages=_footer, onFirstPage=_footer)
     return out_path
+
+
+def _table(rows: list[list[str]], body: ParagraphStyle) -> Table:
+    """Pipe table, first row = header; column widths follow text length.
+    ponytail: no alignment syntax or cell spans; add when a report needs them"""
+    rows = [r for r in rows if not all(re.fullmatch(r":?-{3,}:?", c) for c in r)]
+    n = max(len(r) for r in rows)
+    rows = [r + [""] * (n - len(r)) for r in rows]
+    cell = ParagraphStyle("cell", parent=body, fontSize=8.5, leading=11, spaceAfter=0)
+    def vis(c: str) -> str:  # what the reader sees: badges expanded, link/markup removed
+        c = re.sub(r"\{\{(\w+)\}\}", lambda m: TAGS.get(m[1], m[0]), c)
+        return re.sub(r"\[([^\]]+)\]\([^)]*\)|[*`]", lambda m: m[1] or "", c)
+    # points: every column fits its longest word ("10", "Capgemini"); the rest of the
+    # page width goes to columns with longer text, in proportion to what they lack
+    ch, pad = 5.0, 13  # ~avg glyph width at 8.5 pt, cell padding
+    low = [max(len(w) for r in rows for w in vis(r[j]).split() or [""]) * ch + pad
+           for j in range(n)]
+    want = [max(lo, min(max(len(vis(r[j])) for r in rows), 40) * ch + pad)
+            for j, lo in enumerate(low)]
+    total = A4[0] - 4 * cm
+    extra = sum(want) - sum(low)
+    room = max(total - sum(low), 0)
+    width = [lo + (wa - lo) * min(1, room / extra if extra else 1) for lo, wa in zip(low, want)]
+    t = Table([[Paragraph(_inline(c), cell) for c in r] for r in rows],
+              colWidths=width, repeatRows=1, hAlign="LEFT")
+    t.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, _P["rule"]),
+                           ("ROWBACKGROUNDS", (0, 1), (-1, -1), ["#ffffff", _P["zebra"]]),
+                           ("BACKGROUND", (0, 0), (-1, 0), _P["head"]),
+                           ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+    return t
+
+def _box(lines: list[str], warn: bool, body: ParagraphStyle) -> Table:
+    """'> ' lines -> tinted box with a left bar; '>! ' lines -> warning box."""
+    bg, bar = (_P["warn"], _P["warnbar"]) if warn else (_P["box"], _P["boxbar"])
+    t = Table([[[Paragraph(_inline(x), body) for x in lines]]], colWidths=[A4[0] - 4 * cm])
+    t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), bg),
+                           ("LINEBEFORE", (0, 0), (0, -1), 3, bar),
+                           ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                           ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                           ("TOPPADDING", (0, 0), (-1, -1), 6),
+                           ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
+    return t
+
+
+class _Step(Flowable):
+    """One vertical-timeline row: date | line + dot | sentence. Rows stack with no
+    gap, so the line runs unbroken down the section; page breaks fall between rows.
+    head=True: a quarter label on the line instead of an item."""
+    DW, LX, TX = 64, 74, 86  # date width, line x, text x (points)
+
+    def __init__(self, date_txt: str, kind: str, text: str, body: ParagraphStyle,
+                 head: bool = False):
+        super().__init__()
+        small = ParagraphStyle("tld", parent=body, fontSize=8, leading=10,
+                               alignment=TA_RIGHT, textColor=_P["axis"])
+        self.date = Paragraph(_inline(date_txt).replace(" (", "<br/>("), small)
+        self.text = Paragraph(f"<b>{_inline(text)}</b>" if head else _inline(text),
+                              ParagraphStyle("tlh", parent=body, textColor=_P["h3"])
+                              if head else body)
+        self.kind, self.head = kind, head
+        self.keepWithNext = head  # a quarter label never ends a page alone
+
+    def wrap(self, aw: float, ah: float) -> tuple[float, float]:
+        _, self.hd = self.date.wrap(self.DW, ah)
+        _, self.ht = self.text.wrap(aw - self.TX, ah)
+        self.h = max(self.hd, self.ht) + (8 if self.head else 5)
+        return aw, self.h
+
+    def draw(self) -> None:
+        c, h, x = self.canv, self.h, self.LX
+        c.setStrokeColor(_P["axis"])
+        c.setLineWidth(1.2)
+        c.line(x, 0, x, h)
+        y = h - 7.5 - (3 if self.head else 0)  # centre of the first text line
+        col = _P["h3"] if self.head else _P[self.kind]
+        c.setStrokeColor(col)
+        c.setFillColor(col)
+        if self.head:  # quarter label: short tick across the line
+            c.setLineWidth(2)
+            c.line(x - 6, y, x + 6, y)
+        elif self.kind == "hn":
+            c.rect(x - 3.5, y - 3.5, 7, 7, fill=1)
+        else:  # own blog/YouTube filled, news hollow (B&W tells them apart)
+            c.setFillColor(col if self.kind == "first" else "#ffffff")
+            c.circle(x, y, 3.8, fill=1)
+        top = h - (3 if self.head else 0)
+        self.date.drawOn(c, 0, top - self.hd)
+        self.text.drawOn(c, self.TX, top - self.ht)
+
+
+def _step(s: str, body: ParagraphStyle) -> _Step:
+    """'~ 17 Sep 2026 (3 days ago)|news|sentence' or '~ # Q3 2026' (quarter label)."""
+    s = s[1:].strip()
+    if s.startswith("#"):
+        return _Step("", "first", s.lstrip("# "), body, head=True)
+    d, kind, text = s.split("|", 2)
+    return _Step(d.strip(), kind.strip(), text.strip(), body)
+
+
+LEGEND = ('<font color="{first}">●</font> own blog / YouTube &nbsp; '
+          '<font color="{news}">○</font> news &nbsp; <font color="{hn}">■</font> Hacker News')
 
 
 def _footer(canvas, doc) -> None:

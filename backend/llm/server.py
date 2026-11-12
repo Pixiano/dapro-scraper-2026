@@ -61,6 +61,12 @@ def _build_cmd(role: str) -> list[str]:
     return cmd
 
 
+def _port_pids(netstat: str, port: int) -> set[str]:
+    """PIDs listening on the port, from `netstat -ano -p TCP` output."""
+    return {f[4] for f in map(str.split, netstat.splitlines())
+            if len(f) == 5 and f[3] == "LISTENING" and f[1].rsplit(":", 1)[-1] == str(port)}
+
+
 def _kill_orphans() -> None:
     """Kill an untracked llama-server holding our port.
 
@@ -70,8 +76,13 @@ def _kill_orphans() -> None:
     """
     if not _healthy():
         return
-    subprocess.run(["taskkill", "/IM", "llama-server.exe", "/F"],
-                   capture_output=True, check=False)
+    out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True,
+                         check=False).stdout
+    for pid in _port_pids(out, settings.llm_port):
+        # only the one on our port, and only if it is a llama-server: another
+        # llama-server on this PC (a different port) is someone else's
+        subprocess.run(["taskkill", "/F", "/PID", pid, "/FI", "IMAGENAME eq llama-server.exe"],
+                       capture_output=True, check=False)
     for _ in range(10):
         if not _healthy():
             return

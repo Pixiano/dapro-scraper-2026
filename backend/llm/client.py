@@ -55,7 +55,8 @@ def encode_image(path: str | Path) -> tuple[str, str]:
 
 
 def complete(prompt: str, system: str | None = None, max_tokens: int = 1024,
-             temperature: float = 0.3, reasoning_effort: str | None = None) -> str:
+             temperature: float = 0.3, reasoning_effort: str | None = None,
+             json_mode: bool = False) -> str:
     """Text completion via the synthesis model.
 
     reasoning_effort: gpt-oss reasoning depth ("low"/"medium"/"high"); None uses
@@ -69,7 +70,10 @@ def complete(prompt: str, system: str | None = None, max_tokens: int = 1024,
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
     effort = reasoning_effort or settings.llm_reasoning_effort
-    return _post(messages, max_tokens, temperature, {"reasoning_effort": effort})
+    extra: dict = {"reasoning_effort": effort}
+    if json_mode:  # llama.cpp constrains the answer to valid JSON
+        extra["response_format"] = {"type": "json_object"}
+    return _post(messages, max_tokens, temperature, extra)
 
 
 def describe_image(image_path: str | Path, prompt: str,

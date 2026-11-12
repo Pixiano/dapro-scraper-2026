@@ -35,9 +35,12 @@ class Settings(BaseSettings):
     # Model files, relative to lmstudio_models_dir unless absolute.
     # Vision: Qwen3.5-9B-Q8 chosen over gemma-4-12B on a real-screenshot bench —
     # Gemma hallucinated channel names and misread "451 views" as "451K".
-    # Fallback: gemma-4-12B-it-QAT-Q4_0 + mmproj-gemma-4-12B-it-QAT-BF16.
-    llm_vision_model: str = "lmstudio-community/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q8_0.gguf"
-    llm_vision_mmproj: str = "lmstudio-community/Qwen3.5-9B-GGUF/mmproj-Qwen3.5-9B-BF16.gguf"
+    # 2026-11-11: the 9B files are no longer on this machine; Qwen3.5-4B-Q6_K
+    # (same family, same --image-min-tokens 1024) read company homepages exactly
+    # ("Claude Opus 5.5") where gemma-4-12B misread them ("Opus 3"; its projector
+    # also rejects --image-min-tokens 1024). Set LLM_VISION_MODEL to go back to 9B.
+    llm_vision_model: str = "unsloth/Qwen3.5-4B-GGUF/Qwen3.5-4B-Q6_K.gguf"
+    llm_vision_mmproj: str = "unsloth/Qwen3.5-4B-GGUF/mmproj-BF16.gguf"
     # Synthesis model: gpt-oss-20b (reasoning, Apache-2.0). Fallback: Qwen3-14B-Q4_K_M.
     llm_text_model: str = "lmstudio-community/gpt-oss-20b-GGUF/gpt-oss-20b.gguf"
     llm_reasoning_effort: str = "high"  # gpt-oss reasoning depth for synthesis
@@ -97,6 +100,10 @@ class Settings(BaseSettings):
     synthesis_map_tokens: int = 1300
     synthesis_brief_tokens: int = 2000
     synthesis_dossier_tokens: int = 10000
+
+    # --- Company mechanism ---
+    brave_api_key: str = ""   # Brave Search API; empty → ddgs fallback
+    contact_url: str = ""     # Wikimedia requires a contact in the User-Agent
 
     def model_path(self, rel: str) -> Path:
         p = Path(rel)

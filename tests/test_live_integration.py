@@ -62,3 +62,21 @@ def test_youtube_live_resolver_or_skip(tmp_path):
     assert art.ok is True
     assert art.platform == "youtube"
     assert art.facts, "expected real channel facts back from the live API"
+
+
+@pytest.mark.live
+def test_company_pipeline_live(tmp_path):
+    """Company mechanism end to end against the real sources: Wikidata,
+    HN, Google News, feeds, YouTube, link checks, PDF. Competitors are given,
+    so web search (DuckDuckGo throttles repeated runs) is not exercised."""
+    from backend.company import collect, competitors, report, wikidata
+    company = wikidata.resolve("OpenAI")
+    assert company["on_wikidata"] and company["links"]["website"]
+    comps = competitors.discover(company, names=["Anthropic"])
+    data = collect.collect(company, comps["overall"])
+    for e in (data["company"], *data["competitors"]):
+        assert e["items"], e["label"]
+    raw = {"company": company, "competitors": comps, "collected": data}
+    out = report.build(raw, tmp_path)
+    assert out["pdf"].stat().st_size > 10_000
+    assert out["link_stats"].get("live", 0) > out["link_stats"].get("dead", 0)
