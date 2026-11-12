@@ -49,7 +49,9 @@ def _names(text: str) -> list[str]:
     words, out = text.split(), []
     for prev, w in zip([""] + words, words):
         w = re.sub(r"(?:['’]s)?[^\w-]*$", "", w.strip("\"'“‘(["))
-        if prev and not prev.endswith((".", "!", "?", ":")) and w[:1].isupper():
+        # "Q4" etc.: words with digits are the number check's job
+        if prev and not prev.endswith((".", "!", "?", ":")) and w[:1].isupper() \
+                and not re.search(r"\d", w):
             out.append(w)
     return out
 

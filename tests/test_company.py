@@ -423,6 +423,8 @@ def test_build_report_pdf(tmp_path, monkeypatch):
                           set(), "accenture") is None
     assert analysis.check(claim("Accenture is adding Claude. It grows.", [2]), refs,
                           set(), "accenture") == "name not in the cited headlines"
+    assert analysis.check(claim("Accenture will test with Anthropic in Q4 2026.", [1]), refs,
+                          {"4", "2026"}, "accenture") is None  # "Q4" is not a name
 
 
 # ---- phase 2-4 review fixes ----
