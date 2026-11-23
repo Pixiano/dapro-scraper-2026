@@ -116,9 +116,13 @@ def _styles(family: str) -> dict:
     }
 
 
+_CHECK = ParagraphStyle("check")
+
+
 def _inline(s: str) -> str:
-    """Markdown inline → reportlab mini-markup, XML-escaping text first."""
-    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    """Markdown inline → reportlab mini-markup, XML-escaping text first.
+    Markup reportlab cannot parse falls back to the escaped plain text."""
+    s = plain = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     # one level of balanced parens (Wikipedia "Foo_(bar)"); a raw " would end href=
     s = re.sub(r"\[([^\]]+)\]\((https?://(?:[^()\s]|\([^()\s]*\))+)\)",
                lambda m: f'<a href="{m[2].replace(chr(34), "%22")}" color="{_P['link']}">{m[1]}</a>',
@@ -128,8 +132,13 @@ def _inline(s: str) -> str:
     s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
     s = re.sub(r"\*([^*]+)\*", r"<i>\1</i>", s)
     s = re.sub(r"`([^`]+)`", r'<font face="Courier">\1</font>', s)
-    return re.sub(r"\{\{(\w+)\}\}", lambda m: f'<font color="{_P[m[1]]}"><b>{TAGS[m[1]]}</b></font>'
-                  if m[1] in TAGS else m[0], s)
+    s = re.sub(r"\{\{(\w+)\}\}", lambda m: f'<font color="{_P[m[1]]}"><b>{TAGS[m[1]]}</b></font>'
+               if m[1] in TAGS else m[0], s)
+    try:  # crossed tags ("x `code *star` y*", model prose) make reportlab raise
+        Paragraph(s, _CHECK)
+    except ValueError:
+        return plain
+    return s
 
 
 def render_markdown_pdf(markdown: str, out_path: Path, title: str, bw: bool = False) -> Path:

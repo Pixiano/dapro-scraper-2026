@@ -17,10 +17,8 @@ from pathlib import Path
 
 import httpx
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 
-from ..config import settings
-from .base import LINKEDIN, SourceArtifact
+from .base import LINKEDIN, SourceArtifact, screenshot as _screenshot
 from .website import UA, extract_text
 
 _FOLLOWERS_RE = re.compile(r"([\d,]+)\s*followers", re.I)
@@ -168,26 +166,6 @@ def _parse_content(art: SourceArtifact, items: list[dict]) -> None:
     if heads:
         art.text_blocks.append({"label": f"published articles ({len(heads)})",
                                 "text": "\n".join(f"- {h}" for h in heads)})
-
-
-def _screenshot(url: str, job_dir: Path, art: SourceArtifact) -> None:
-    shots = job_dir / "screenshots"
-    shots.mkdir(parents=True, exist_ok=True)
-    slug = re.sub(r"[^a-z0-9]+", "-", url.lower()).strip("-")[:40] or "linkedin"
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_context(user_agent=UA, locale="en-US",
-                                       viewport={"width": 1280, "height": 1400}).new_page()
-            page.goto(url, wait_until="domcontentloaded",
-                      timeout=settings.social_nav_timeout_ms)
-            page.wait_for_timeout(1800)
-            shot = shots / f"{slug}.png"
-            page.screenshot(path=str(shot))
-            art.screenshots.append(str(shot))
-            browser.close()
-    except Exception as exc:
-        art.errors.append(f"linkedin screenshot: {type(exc).__name__}")
 
 
 def collect(url: str, job_dir: Path) -> SourceArtifact:

@@ -27,6 +27,7 @@ function platformOf(url) {
   if (/(^|\/\/|\.)patreon\.com/.test(u)) return "patreon";
   if (/(^|\/\/|\.)(ko-fi\.com|buymeacoffee\.com)/.test(u)) return "kofi";
   if (/(^|\/\/|\.)twitch\.tv/.test(u)) return "twitch";
+  if (/(^|\/\/)(www\.)?bsky\.app/.test(u)) return "bluesky";
   return u.trim() ? "website" : "—";
 }
 
@@ -240,10 +241,11 @@ function renderSources(job) {
         // at actually firing here — a shown-but-never-loaded image is worse
         // than fetching a few MB locally.
         w.innerHTML =
-          (src ? `<img src="${esc(src)}" alt="screenshot"
-                     onclick="window.open('${esc(src)}','_blank')">` : "") +
+          (src ? `<img src="${esc(src)}" alt="screenshot">` : "") +
           `<div class="d">${n.description ? esc(n.description)
             : `<span class="hint">skipped — ${esc(n.skipped)}</span>`}</div>`;
+        // a listener, not inline onclick: the path may contain a quote
+        w.querySelector("img")?.addEventListener("click", () => window.open(src, "_blank"));
         d.appendChild(w);
       }
       el.appendChild(d);

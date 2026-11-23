@@ -1,10 +1,11 @@
 """Manage a single llama.cpp `llama-server` subprocess.
 
-VRAM is 16 GB, so only one model is resident at a time (settings.models_sequential).
+VRAM is 16 GB, so only one model is resident at a time.
 `ensure(role)` starts the server for the requested role, swapping models if a
 different one is loaded. Roles: "text" and "vision" (vision adds --mmproj)."""
 
 import subprocess
+import threading
 import time
 
 import httpx
@@ -13,6 +14,11 @@ from ..config import settings
 
 _proc: subprocess.Popen | None = None
 _role: str | None = None
+# Held for a whole creator job (worker.py) or company web run (company/web.py),
+# so one cannot swap the model under the other.
+# ponytail: one coarse lock, also held through a run's non-model stages; lock
+# per model stage (synthesis/vision/company pipeline) if the wait ever matters.
+run_lock = threading.Lock()
 
 
 class LlamaServerError(RuntimeError):

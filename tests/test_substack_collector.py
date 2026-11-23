@@ -2,7 +2,7 @@
 
 import pytest
 
-from backend.collectors import substack as ss
+from backend.collectors import feed as ss
 from backend.collectors.base import SUBSTACK, classify_url
 
 

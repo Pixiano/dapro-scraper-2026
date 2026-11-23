@@ -11,12 +11,12 @@
 **A local-first research tool with two jobs:**
 
 1. **Creator dossiers.** Paste links to a YouTuber, creator or small company (website, YouTube,
-   Instagram, GitHub, Patreon, 15+ platforms). It scrapes each one, has a local vision model read
+   Instagram, GitHub, Bluesky, Patreon, 15+ platforms). It scrapes each one, has a local vision model read
    the screenshots, and has a local LLM write one research dossier (Markdown or PDF) where every
    inferred claim carries a confidence level and a cited source.
 2. **Company AI competitor reports.** Type a company name. It finds the competitors, collects what
-   each one did in AI over the last quarters (news, Hacker News, blogs, YouTube), checks every
-   link, and writes a PDF with a scorecard and a timeline per company.
+   each one did in AI over the last quarters (news, Hacker News, blogs, YouTube, plus Hugging
+   Face models, GitHub repos and SEC filings counted on their own), checks the links it shows, and writes a PDF with a scorecard and a timeline per company.
 
 Both run **on my own machine**: the AI models are local (llama.cpp), so no AI API key and no
 per-token bill. The only things that leave the PC are the requests to the sites being researched,
@@ -118,8 +118,8 @@ architecture, HTTP API).
 1. **Start the server:** `.venv\Scripts\python -m uvicorn backend.main:app --port 8123`
 2. **Open** `http://localhost:8123`.
 3. **Paste links**, as many as I want, for one entity: website, YouTube, Instagram, Facebook,
-   LinkedIn, GitHub, Medium, Substack, Reddit, X/Twitter, Linktree/Beacons/stan.store, Patreon,
-   Ko-fi/Buy Me a Coffee, Twitch, or literally any other website (there's a generic fallback
+   LinkedIn, GitHub, Medium, Substack, Reddit, X/Twitter, Bluesky, Linktree/Beacons/stan.store,
+   Patreon, Ko-fi/Buy Me a Coffee, Twitch, or literally any other website (there's a generic fallback
    collector for that: no site left behind). Optionally give the entity a name.
 4. **Click the big red button.** Go get a coffee: a real job with vision + synthesis on several
    sources genuinely takes a few minutes, because the GPU is doing actual work, not just vibing.
@@ -128,10 +128,11 @@ architecture, HTTP API).
 What happens in between:
 
 - **Each link is scraped** with a purpose-built collector per platform (not just "screenshot and
-  pray"): real API calls where APIs exist (YouTube, GitHub, Reddit's JSON endpoints), structured
-  data where it's hiding in the page (LinkedIn's JSON-LD, Patreon's embedded JSON:API blob), RSS
-  where that's the sane option (Medium, Substack), and a headless-browser render for everything
-  else.
+  pray"): real API calls where APIs exist (YouTube, GitHub, Bluesky, Reddit's JSON endpoints),
+  structured data where it's hiding in the page (LinkedIn's JSON-LD, Patreon's embedded JSON:API
+  blob), RSS where that's the sane option (Medium, Substack, and YouTube when there's no API
+  key), and a headless-browser render for everything else. Four collectors run at a time, and
+  one that crashes only costs its own source.
 - **A news feed comes free:** if I gave it an entity name, it auto-attaches a Google News search
   for that name. I didn't even ask. It just does it. Overachiever.
 - **A local vision model reads every screenshot.** Not to transcribe text I already scraped
@@ -142,7 +143,8 @@ What happens in between:
 - **A local reasoning LLM writes the dossier:** factual findings per source, plus an "Inferred
   Insights" section on business model, audience, positioning and monetization, where **every
   single claim carries a confidence level and a cited quote**. If it doesn't know, it says so in
-  Gaps & Caveats instead of making something up.
+  Gaps & Caveats instead of making something up. Code then checks every quote of three or more
+  words against the collected text and marks the ones it can't find word for word.
 
 Which platforms are covered and how: [docs/creator-dossiers.md](docs/creator-dossiers.md).
 
@@ -253,7 +255,11 @@ Consultancy Services and Wipro).
   headlines, not deals or revenue.
 - **The analysis paragraphs come from a local model** and are checked by code: a sentence without
   a valid citation, with a number not in the facts, or naming something its sources do not
-  mention is removed.
+  mention is removed. The number check is loose: a number from any headline passes in any
+  sentence, not only in one citing that headline.
+- **The AI filter is a keyword list** and misses about a third of AI headlines on a realistic mix
+  (measured: [the AI filter](docs/company-reports.md#how-it-works-step-by-step)), so the counts
+  are on the low side.
 - **Some results are still wrong:** Lectra shows up as a Nestlé rival (it competes with a
   different company called Gerber), map apps with no AI news show up as Alphabet rivals, and the
   low-confidence appendix contains some junk names.
@@ -270,7 +276,7 @@ local model server, but they are separate pipelines.
 ```mermaid
 flowchart LR
     subgraph creator["Creator dossier (browser, localhost:8123)"]
-        A1["Links you paste"] --> A2["15 platform collectors"]
+        A1["Links you paste"] --> A2["Platform collectors<br/>(four at a time)"]
         A2 --> A3["Local vision model<br/>reads screenshots"]
         A2 --> A4
         A3 --> A4["Local LLM writes<br/>the dossier, with citations"]
@@ -279,14 +285,15 @@ flowchart LR
     subgraph company["Company report (CLI or /company.html)"]
         B1["Company name"] --> B2["Wikidata: website,<br/>products, channels"]
         B2 --> B3["Competitors:<br/>web search or --competitors"]
-        B3 --> B4["AI news per quarter:<br/>Google News, Hacker News,<br/>blogs, YouTube"]
+        B3 --> B4["AI news per quarter:<br/>Google News, Hacker News,<br/>blogs, YouTube<br/>+ Hugging Face, GitHub, SEC"]
         B4 --> B5["Link check, counts, rules<br/>(+ optional local-model notes<br/>and checked analysis)"]
         B5 --> B6["PDF + Markdown + raw.json"]
     end
 ```
 
 **Creator dossiers:** FastAPI + a single-worker job queue (one GPU, so one model loaded at a
-time: vision and synthesis take turns), SQLite for job state, caching and the YouTube quota
+time: vision and synthesis take turns, and a lock makes dossier jobs and company runs from the
+browser page take turns too), SQLite for job state, caching and the YouTube quota
 ledger, Playwright + httpx + BeautifulSoup for scraping, and llama.cpp's `llama-server` running
 Qwen3.5 (vision) and gpt-oss-20b (synthesis). Full architecture and the HTTP API:
 [docs/creator-dossiers.md](docs/creator-dossiers.md).
@@ -304,7 +311,8 @@ Fair question. Here's what I specifically built in to stop this thing from confi
 
 - **Text-first, vision-as-a-backup.** If I already scraped a page's real text, the vision model is told to describe the *design*, not re-read the words, because re-reading them is exactly how numbers get hallucinated. (See: the entire 451-vs-451K incident above. I learned. Painfully.)
 - **Every inference needs receipts.** The dossier prompt doesn't let the model write "they probably make $10K/month" with nothing backing it: it has to be `**Claim** — (confidence: medium) — Evidence: "quote from a real source" [platform]`, or it doesn't go in.
-- **The company reports don't trust the model either.** The model only ever sees the report's own headlines and counts, and code deletes every sentence it can't trace back to them. The numbers themselves never come from a model at all.
+- **Quotes get checked, not just requested.** After the dossier is written, code looks for every quote of three or more words in the text that was actually collected. If it isn't there word for word, the quote gets an *"unverified: not verbatim in the sources"* label. Honest caveat: on 13 old dossiers that flagged about 1 in 5 quotes, and a lot of those were the model lightly rewording a real sentence. The check can't tell rewording from invention, so a label means "go look", not "it lied".
+- **The company reports don't trust the model either.** The model only ever sees the report's own headlines and counts, and code deletes every sentence with a bad citation, a name its cited headlines don't contain, or a number that isn't in the facts at all. (That last check is looser than it sounds: a number from *any* headline passes.) The counts themselves never come from a model at all.
 - **Failures are boring on purpose.** If a source 404s, gets rate-limited, or a platform decides my IP looks like a robot (rude, but fair, it is a robot), the dossier just says *"No notable public information found."* It will never print "HTTP 403" or a stack trace into my nice research document. That stuff lives in the debug view where it belongs.
 - **No login automation, anywhere.** Instagram, Facebook, LinkedIn, Reddit, Patreon: all logged-out, best-effort, public-data-only. I'm not trying to get my account banned or my IP blacklisted. Some sources will come back thin. That's the deal with polite scraping, and I think it's the right one.
 
@@ -332,12 +340,16 @@ end up on GitHub. One `NAME=value` per line, no quotes needed:
 CONTACT_URL=https://github.com/your-name
 YOUTUBE_API_KEY=
 BRAVE_API_KEY=
+GITHUB_TOKEN=
 ```
+
+`.env.example` lists every key with a one-line comment.
 
 | Key | Needed? | What for |
 |---|---|---|
-| `CONTACT_URL` | **Yes**, for anything that touches Wikidata (all company reports) | Wikimedia's API rules require a contact in the User-Agent and answer 403 without one. A URL or an email. Sent only to Wikimedia. |
-| `YOUTUBE_API_KEY` | Optional | Creator dossiers: the YouTube collector. Company reports: full upload history instead of the latest 15 videos from RSS. |
+| `CONTACT_URL` | **Yes**, for anything that touches Wikidata (all company reports) | Wikimedia's API rules require a contact in the User-Agent and answer 403 without one; SEC EDGAR requires one too. A URL or an email. Sent only to Wikimedia and SEC EDGAR. |
+| `YOUTUBE_API_KEY` | Optional | Creator dossiers: channel description, statistics and comments; without it the YouTube collector falls back to the channel's RSS feed (latest videos and transcripts only) and marks the source as reduced. Company reports: full upload history instead of the latest 15 videos from RSS. |
+| `GITHUB_TOKEN` | Optional | Creator dossiers: the GitHub collector. Company reports: the new-repos count. Raises GitHub's API limit from 60 to 5,000 requests an hour; no scopes needed for public data. |
 | `BRAVE_API_KEY` | Optional, **paid** | Company reports: adds Brave Search to DuckDuckGo, which finds more competitors. No free plan (card required; about $5 of searches a month included). |
 
 **No AI key anywhere.** The models are local.
@@ -379,8 +391,8 @@ Creator dossiers at `http://localhost:8123`, company reports at
 .venv\Scripts\python -m pytest -q
 ```
 
-263 tests, fully offline (everything's mocked: no real network calls, no GPU spin-up), runs in
-about 2 seconds. If the suite ever takes suspiciously longer than that, something snuck a real
+A few hundred tests, fully offline (everything's mocked: no real network calls, no GPU spin-up),
+done in a few seconds. If the suite ever takes suspiciously longer than that, something snuck a real
 network/model call into a unit test again. I've caught myself doing this more than once. Type
 checks: `.venv\Scripts\python -m mypy backend` (both run in CI on every push, see
 `.github/workflows/tests.yml`).
@@ -415,17 +427,20 @@ backend/
   main.py, worker.py, jobs.py   FastAPI app, job queue, job store (creator dossiers)
   pipeline.py                   creator dossier pipeline: collect -> vision -> synthesis
   collectors/                   one collector per platform (+ generic website fallback)
-  vision.py, synthesis.py       local-model stages for the dossiers
-  llm/                          llama-server start/stop and client
-  youtube/, instagram/          YouTube Data API client + quota, Instagram lookup
+  vision.py, synthesis.py       local-model stages for the dossiers (+ the quote check)
+  llm/                          llama-server start/stop, the shared model lock, and client
+  youtube/, instagram/          YouTube API client + link resolver, Instagram lookup
+                                (helpers for the YouTube and social collectors)
   pdf.py                        Markdown -> PDF (ReportLab), shared by both mechanisms
   cache.py, quota.py, config.py SQLite cache, YouTube quota ledger, settings from .env
+  ratelimit.py                  per-IP rate limits on the job endpoints
   company/                      company AI competitor reports
     __main__.py                 the CLI (python -m backend.company)
     pipeline.py                 the five steps, shared by the CLI and the browser page
     wikidata.py                 resolve the company, its links and products
     competitors.py              competitor search and confidence
-    collect.py, social.py       news, Hacker News, blogs, YouTube; --social
+    collect.py, social.py       news, Hacker News, blogs, YouTube, Hugging Face,
+                                GitHub, SEC filings; --social
     visual.py, analysis.py      optional local-model vision notes and checked analysis
     linkcheck.py, report.py     link checks; the report, scorecard and timelines
     web.py                      /api/company routes behind company.html
@@ -438,9 +453,9 @@ data/                           everything the app writes (git-ignored)
 tools/llamacpp/                 llama-server binaries (git-ignored, download separately)
 ```
 
-The planning documents from earlier phases (the original spec, the V2 plan, the company plan,
-future ideas, an unimplemented ngrok hosting plan) are kept in [docs/plans/](docs/plans/) for
-history; the code and these docs are the current truth.
+The planning documents from earlier phases (the V2 aggregator plan, the company plan and a list
+of future ideas: `PLAN-V2-AGGREGATOR.md`, `PLAN-COMPANY.md`, `suggestions.txt`) are kept in
+[docs/plans/](docs/plans/) for history; the code and these docs are the current truth.
 
 ---
 
@@ -448,12 +463,16 @@ history; the code and these docs are the current truth.
 
 - **Reddit, Instagram, Facebook, LinkedIn, Patreon, Ko-fi** are all logged-out best-effort. Sometimes they'll give you everything, sometimes they'll give you nothing and a shrug. This is the nature of scraping platforms that actively don't want to be scraped, and I chose "degrade gracefully" over "log in and risk getting banned."
 - **TikTok** isn't supported. It's geo-blocked from my dev machine and thin logged-out anyway. Recognized as a valid future addition, not implemented.
-- **No server-side video/audio analysis.** It reads pixels and text, not sound.
-- **Company reports count headlines**, and search finds too few rivals on its own; some rivals it finds are wrong (see [What to expect](#what-to-expect-the-honest-part)). The AI filter is a keyword list, not a classifier.
+- **No server-side video/audio analysis.** It reads pixels and text, not sound. (YouTube transcripts are text, so those do get read.)
+- **YouTube without an API key is the reduced version:** latest videos from RSS, no channel description, subscriber numbers or comments. The dossier source says so.
+- **The quote check is word-for-word.** It flags about 1 in 5 quotes on old dossiers, many of them light rewordings rather than inventions, and it can't tell which is which. Everything else about grounding (confidence levels, "use only the sources") is the prompt's job, not code's.
+- **Company reports count headlines**, and search finds too few rivals on its own; some rivals it finds are wrong (see [What to expect](#what-to-expect-the-honest-part)). The AI filter is a keyword list, not a classifier, and misses about a third of AI headlines; the analysis number check lets a number from any headline into any sentence. Hugging Face, GitHub and SEC counts depend on ids being on Wikidata, and many companies (most big consultancies, for GitHub) have none, which shows as "-".
+- **The link safety check runs once, at submit.** Links must be `http(s)` and resolve to public addresses, but a site that later redirects somewhere private isn't caught. Fine for a localhost tool; not something I'd put on the open internet as is.
+- **The company CLI doesn't share the model lock.** Dossier jobs and company runs from the browser page take turns on the one model server; `python -m backend.company` is a separate process and doesn't wait, so don't run it while the web app is busy with a job.
 - **Windows-first.** Built and run on Windows 11; `--open` and the model-server cleanup are Windows-only.
 - **This is a research tool, not a mass-surveillance tool.** It's built for looking up one entity at a time from links you already have. Please don't point it at thousands of people. Also: be a decent human about what you do with the output.
 
-See [`docs/plans/suggestions.txt`](docs/plans/suggestions.txt) for the "here's what I'd build next" list (GitHub deeper-dive, comparison mode for 2+ entities, custom research questions, scheduled re-runs to track changes over time, and more).
+[`docs/plans/suggestions.txt`](docs/plans/suggestions.txt) is the "here's what I'd build next" list I wrote early on. Some of it is built now (the GitHub collector with READMEs of the top repos, the news feed, Reddit and X). Still open: app-store data, comparison mode for 2+ entities, custom research questions, structured JSON output, and scheduled re-runs to track changes over time.
 
 ---
 
@@ -473,6 +492,12 @@ See [`docs/plans/suggestions.txt`](docs/plans/suggestions.txt) for the "here's w
 | Brave sign-up asks for a card | Brave's Search API has no free plan; about $5 of searches a month are included | Optional: without it, search is DuckDuckGo only. |
 | A repeat run finds the same (wrong) rivals | Search results are cached for 24 hours, Wikidata for 30 days | `--fresh` for one uncached run. |
 | `error: SomeError: ...` and nothing else | Errors print as one line by default | Rerun with `--debug` for the full traceback, and open an [issue](https://github.com/Pixiano/dapro-scraper-2026/issues) if it looks like a bug. |
+| Creator job: `badLink: ... local and private-network addresses are not accepted` (or `only http(s) links are accepted`) | The server only fetches `http(s)` links that resolve to public addresses | Use the public URL. Links to your own network are refused on purpose. |
+| A job shows the error `interrupted by restart` | The server stopped while the job was running; queued jobs live in memory and can't resume | Submit the links again. |
+| A dossier quote says *unverified: not verbatim in the sources* | Code could not find that quote word for word in the collected text | Open the source card and check it: often it's a light rewording, sometimes it's made up. |
+| The YouTube source's facts say `view: reduced (no YOUTUBE_API_KEY)` | No YouTube key, so it used the channel's RSS feed | Expected. Add `YOUTUBE_API_KEY` to `.env` for statistics, the channel description and comments. |
+| GitHub source: `github: API rate limit reached` (or `repos fetch HTTP 403`) | GitHub's limit for requests without a token is 60 an hour | Wait an hour, or set `GITHUB_TOKEN` in `.env`. |
+| A creator job sits in "queued" while a company report runs in the browser | Both share the one model server and take turns | Expected; it starts when the report ends. |
 | The offline test suite takes more than a few seconds | A test is making a real network or model call | Find it and mock it; live tests belong under `@pytest.mark.live`. |
 
 ---
@@ -483,9 +508,9 @@ Mostly here for the "what does this actually show I can do" crowd: recruiters, f
 
 - **Backend architecture:** FastAPI, async job orchestration with a single-worker queue (deliberate: one GPU, one model resident at a time), SQLite for job state/caching/quota tracking.
 - **LLM integration & prompt engineering:** local model orchestration via llama.cpp, grounded output design (every synthesized claim requires cited evidence), role-aware prompting (different instructions depending on whether text was already scraped or only exists as pixels), and code that checks model output against its sources and deletes what fails.
-- **Web scraping at scale:** 15 platform-specific collectors using whatever's actually reliable per site (REST APIs, RSS, embedded JSON blobs, JSON-LD, headless-browser rendering) plus a generic fallback so no site is unsupported; Wikidata entity resolution and multi-engine competitor search for the company reports.
-- **Security-conscious design:** path-traversal-safe file serving, rate limiting, no credential/login automation anywhere, sanitized error handling (raw errors never reach either the AI prompt or the end document).
-- **Testing discipline:** 263 offline tests in about 2 seconds, plus a 16-scenario live suite that checks every generated report against the same rules.
+- **Web scraping at scale:** platform-specific collectors for 15+ platforms, run four at a time, using whatever's actually reliable per site (REST APIs, RSS, embedded JSON blobs, JSON-LD, headless-browser rendering) plus a generic fallback so no site is unsupported; Wikidata entity resolution and multi-engine competitor search for the company reports.
+- **Security-conscious design:** file serving that only returns files inside a real job's folder, only public `http(s)` links accepted (checked at submit), a localhost-only Host check against DNS rebinding, rate limiting, no credential/login automation anywhere, sanitized error handling (raw errors never reach either the AI prompt or the end document).
+- **Testing discipline:** an offline suite of a few hundred tests that runs in seconds, plus a 16-scenario live suite that checks every generated report against the same rules.
 - **Debugging under real constraints:** several of the war stories below involved reverse-engineering undocumented third-party JSON shapes (Patreon) and diagnosing silent failures in a local inference stack with no error messages to go on.
 
 ---

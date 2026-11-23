@@ -85,7 +85,9 @@ def parse(text: str, names: list[str], refs: dict[int, str], facts: str) -> dict
     """Model reply -> checked claims. Unknown company names are ignored;
     predictions, and "high" claims citing one source, are lowered to medium."""
     js = json.loads(text[text.index("{"):text.rindex("}") + 1])
-    allowed = set(NUM.findall(facts))
+    # not facts a claim may quote: a headline's [n] index and date, the competitor's number
+    allowed = set(NUM.findall(re.sub(
+        r"(?m)^(?:COMPETITOR \d+|\[\d+\] (?:\d+ \w+ \d+(?: \([^)]*\))? )?)", "", facts)))
     own = " ".join(names).lower()
     dropped: list[str] = []
 

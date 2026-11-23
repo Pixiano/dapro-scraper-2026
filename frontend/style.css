@@ -54,6 +54,7 @@ button.icon:hover { color: #c4302b; }
 .badge.patreon { background: #ffe0e8; color: #a3123c; }
 .badge.kofi { background: #ffe4e6; color: #b3404a; }
 .badge.twitch { background: #ece0ff; color: #5a2fa3; }
+.badge.bluesky { background: #dcecff; color: #0b5cad; }
 .badge.ok { background: #dff0e2; color: #256b34; }
 .badge.fail { background: #fbe6e6; color: #8c2a26; }
 

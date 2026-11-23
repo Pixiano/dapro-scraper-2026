@@ -3,8 +3,14 @@
 import pytest
 from PIL import Image, ImageDraw
 
-from backend import vision
+from backend import cache, vision
 from backend.config import settings
+
+
+@pytest.fixture(autouse=True)
+def tmp_db(tmp_path, monkeypatch):  # the description cache must not leak between tests
+    monkeypatch.setattr(settings, "db_path", tmp_path / "app.db")
+    cache.init_db()
 
 
 def _img(path, color="white", text=None):
@@ -134,3 +140,20 @@ def test_analyze_processes_all_artifacts(tmp_path, monkeypatch):
             for i in range(2)]
     out = vision.analyze(arts)
     assert all(len(a["vision_notes"]) == 1 for a in out)
+
+
+def test_same_image_is_described_once_across_runs(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(vision.client, "describe_image",
+                        lambda path, prompt, **k: calls.append(prompt) or "a red banner")
+    shot = _img(tmp_path / "s.png", text="SHOT")
+
+    first = vision.analyze([{"screenshots": [shot], "images": []}])
+    again = vision.analyze([{"screenshots": [shot], "images": []}])     # the re-run
+
+    assert len(calls) == 1
+    assert again[0]["vision_notes"] == first[0]["vision_notes"]
+    # another model must not be served the old model's description
+    monkeypatch.setattr(settings, "llm_vision_model", "other.gguf")
+    vision.analyze([{"screenshots": [shot], "images": []}])
+    assert len(calls) == 2

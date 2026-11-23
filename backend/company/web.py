@@ -1,15 +1,19 @@
 """Phase 7: localhost API for the company pipeline. The page is
 frontend/company.html; reports are the same files the CLI writes."""
 
+import ipaddress
 import re
+import socket
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 from fastapi import APIRouter
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
+from ..llm import server
 from .pipeline import OUT, run
 
 router = APIRouter(prefix="/api/company")
@@ -33,8 +37,37 @@ class RunIn(BaseModel):
     context: str | None = None
 
 
+def url_error(url: str) -> str | None:
+    """Why a user-supplied link must not be fetched, or None. Also used by
+    main.py for creator links. Bare "acme.io" is read as https, as the collectors do.
+    ponytail: checked once at submit; a redirect or a DNS answer that changes
+    afterwards is not caught. Pin the resolved IP in the fetchers if that matters."""
+    try:
+        u = urlparse(url if "://" in url else "https://" + url)
+        host = u.hostname
+    except ValueError:
+        return "not a valid URL"
+    if u.scheme not in ("http", "https") or not host:
+        return "only http(s) links are accepted"
+    try:
+        addrs = {str(a[4][0]) for a in socket.getaddrinfo(host, None)}
+    except (OSError, UnicodeError):
+        return None  # does not resolve: nothing to reach, the collector reports it
+    if not all(ipaddress.ip_address(a.split("%")[0]).is_global for a in addrs):
+        return "local and private-network addresses are not accepted"
+    return None
+
+
 def _work(rid: str, body: RunIn) -> None:
-    _runs[rid]["status"] = "running"
+    with server.run_lock:  # the creator worker shares the one model server
+        _runs[rid]["status"] = "running"
+        try:
+            _run(rid, body)
+        finally:
+            server.stop()  # free the GPU, as the CLI does
+
+
+def _run(rid: str, body: RunIn) -> None:
     try:
         names = [n.strip() for n in (body.competitors or "").split(",") if n.strip()]
         r = run(body.name.strip(), body.url or None, names=names, social=body.social,
@@ -53,6 +86,8 @@ def _work(rid: str, body: RunIn) -> None:
 def start(body: RunIn):
     if not body.name.strip():
         return JSONResponse(status_code=400, content={"error": "name is required"})
+    if body.url and (err := url_error(body.url.strip())):
+        return JSONResponse(status_code=400, content={"error": f"url: {err}"})
     rid = uuid.uuid4().hex[:12]
     _runs[rid] = {"id": rid, "name": body.name.strip(), "status": "queued"}
     _pool.submit(_work, rid, body)

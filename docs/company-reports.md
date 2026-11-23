@@ -33,11 +33,13 @@ The tool then:
    Wikipedia) to get its official website, YouTube channel, blog and main products;
 2. finds its competitors by web search, or takes the ones you name;
 3. collects what each company did in AI over the last two quarters and this quarter so far, from
-   Google News, Hacker News, the company's own blog and its YouTube channel;
+   Google News, Hacker News, the company's own blog and its YouTube channel; and, counted apart
+   from those headlines, its releases and filings: Hugging Face models, new public GitHub repos
+   and SEC current reports (8-K/6-K);
 4. optionally screenshots each homepage and has a **local** vision model list the AI products on
    it;
-5. checks every link, optionally has a **local** text model write short analysis paragraphs
-   (checked sentence by sentence by code), and writes a PDF.
+5. checks the links the report will show, optionally has a **local** text model write short
+   analysis paragraphs (checked sentence by sentence by code), and writes a PDF.
 
 Everything lands in `data/company/<company>/<date>/`:
 
@@ -45,7 +47,7 @@ Everything lands in `data/company/<company>/<date>/`:
 |---|---|
 | `report.pdf` | The report. [Example: Capgemini, 13 pages](examples/capgemini-report.pdf). |
 | `report.md` | The same report as Markdown. |
-| `raw.json` | Every item, link, HTTP status and check time, for auditing. |
+| `raw.json` | Every item, link, HTTP status and check time, for auditing. Written once before the report step and again after it, so if the link check, the model or the PDF fails, the collected data (and the searches it cost) is still there. |
 | `analysis_raw.txt` | The text model's raw reply, before the code checks (only when analysis ran). |
 | `screenshots/` | The homepage screenshots the vision model looked at (only when vision ran). |
 
@@ -156,7 +158,9 @@ skips the search entirely and is the most reliable list you can get:
 ```
 
 Separate the names with commas. Each name is still looked up on Wikidata to find its website,
-blog and YouTube channel. Names with punctuation work: `--competitors "AT&T,T-Mobile US"`.
+blog, YouTube channel and the other ids, and it resolves to the business the way searched names
+do ("Meta" becomes Meta Platforms). A name that matches no business is still used as you typed
+it. Names with punctuation work: `--competitors "AT&T,T-Mobile US"`.
 
 ### Report on a startup, or a name several companies share
 
@@ -232,7 +236,11 @@ dots and squares.
 4. Click **Build report**. The PDF opens when it is done.
 
 Past reports are listed under the form with PDF and Markdown links. The page runs one report at
-a time and always uses the default limits (5 categories, 3 per category, 10 overall).
+a time and always uses the default limits (5 categories, 3 per category, 10 overall). It shares
+the local model server with creator dossiers, so a report waits for a running dossier job (and
+the other way round), and the model server is stopped when the report ends, to free the GPU.
+The website field must be an `http(s)` link to a public address. The command line is a separate
+process that doesn't wait for the web app, so don't run both with the models at the same time.
 
 ![The company report page in the browser](screenshots/06-company-page.png)
 
@@ -251,7 +259,7 @@ anonymous visitors.
 
 Search results are cached for 24 hours and Wikidata answers for 30 days (in `data/app.db`), so a
 repeat run skips the slow lookups and does not trip DuckDuckGo's throttle. `--fresh` ignores the
-cache for one run. News, feeds and link checks are never cached.
+cache for one run. News, feeds, releases and filings, and link checks are never cached.
 
 ---
 
@@ -275,10 +283,16 @@ The report runs from short to detailed:
      so far this quarter, 27% of this company's headlines were about AI; last quarter it was 40%;
      that is a fall of more than 20%, so "down". The badge in brackets is how much to trust that
      trend (see below).
-4. **Company vs its competitors (analysis)** and **Caveats** (the amber box): what the report
+4. **Releases and filings**: a second table under the scorecard, one row per company, with
+   "last quarter / this quarter" counts for Hugging Face models, new public GitHub repos and SEC
+   current reports (8-K/6-K). A "-" means the company has no id for that source (see below).
+   Only shown when at least one company has one.
+5. **Company vs its competitors (analysis)** and **Caveats** (the amber box): what the report
    cannot tell you this time, for example "Only 5 of the 10 requested competitors were
    confirmed".
-5. **One section per company**: where it competes, item counts per quarter, then a timeline.
+6. **One section per company**: where it competes, item counts per quarter, a **Releases and
+   filings** line (the same counts, how many of the GitHub repos are AI by keyword, and up to 2
+   most-liked models, 2 most-starred repos and 3 newest filings, each cited), then a timeline.
 
 ![Page 2 of the Capgemini report: caveats and the company's AI timeline](screenshots/08-company-report-timeline.png)
 
@@ -326,14 +340,43 @@ returns more recent headlines than old ones, which made a per-day count say "up"
 everyone. Only sources with full history count towards it: blog and Medium feeds and YouTube
 RSS only return the latest posts.
 
+### Releases and filings
+
+These are dated and first-party, but they are not headlines, so they are counted on their own
+and **never** feed the AI items, the AI share, the outlook or the likely-focus terms.
+
+- **Hugging Face models**: every model counts as AI work. The organisation is the one on
+  Wikidata; without one, the tool tries a Hub organisation named like the company's GitHub
+  account or like the company, and accepts it only if Hugging Face has verified it and its
+  display name names the company (an unverified lookalike, such as the one for Infosys, is
+  refused). At most 500 models per organisation, newest first; no key needed.
+- **GitHub repos**: new public repos of the company's account, forks left out, at most 400 per
+  company per run. A repo is AI only if its name or description matches the same keyword list
+  as the headlines. Without a token GitHub allows 60 requests an hour; `GITHUB_TOKEN` in `.env`
+  raises that to 5,000.
+- **SEC filings**: current reports, form 8-K, plus 6-K for foreign issuers such as Wipro. The
+  8-K item codes are shown in words ("quarterly results", "officer or director change"); the
+  exhibits item (9.01), which is on almost every filing, is left out. A filing never counts as
+  AI.
+
+The GitHub account and the SEC CIK come only from Wikidata. Hitting the Hugging Face or GitHub
+cap is noted in the company's collection errors. The profile links (`huggingface`, `github`,
+`sec`) are link-checked like the rest.
+
 ### The analysis paragraphs
 
 Written by a local text model (gpt-oss-20b) that sees only the report's own headlines and
 counts. Code then removes any sentence that has no valid `[n]` citation, no confidence, a number
-that is not in the facts it was given, or names something (a product, a company) that does not
-appear in the headlines it cites. The caveats say how many sentences were removed. A sentence
-that passes still only means its sources say so: a word like "agentic" can still be the model's
-own gloss, so open the sources before relying on a claim.
+that does not appear in the facts it was given, or names something (a product, a company) that
+does not appear in the headlines it cites. For the number check, the bookkeeping in the facts
+does not count as a number the model may use: a headline's source number `[n]`, its date, and
+the "COMPETITOR 3" numbering are left out. The caveats say how many sentences were removed.
+
+What the number check does **not** do: it doesn't check that a number belongs to the sources a
+sentence cites. A number from any headline or count in the facts passes in any sentence, so "52%"
+from one company's headline could be attached to another company and survive. A sentence that
+passes still only means its sources say so: a word like "agentic" can still be the model's own
+gloss, so open the sources before relying on a claim.
 
 ### The vision notes
 
@@ -352,7 +395,7 @@ flowchart TD
     C -- yes --> E["Look up each named rival<br/>on Wikidata"]
     C -- no --> D["2. Web search per category<br/>DuckDuckGo (+ Brave if key set)<br/>names checked on Wikidata"]
     D --> E
-    E --> F["3. Collect AI news per quarter<br/>Google News, Hacker News,<br/>blogs, YouTube"]
+    E --> F["3. Collect AI news per quarter<br/>Google News, Hacker News,<br/>blogs, YouTube<br/>+ releases and filings:<br/>Hugging Face, GitHub, SEC"]
     F --> G{"vision on?"}
     G -- yes --> H["4. Homepage screenshots<br/>+ local vision model"]
     G -- no --> I
@@ -365,16 +408,28 @@ flowchart TD
 
 | Step | Source | What happens |
 |---|---|---|
-| 1. Resolve | Wikidata, Wikipedia pageviews | Finds the company, its official links, and its products and subsidiaries. Categories with under 5% of the top category's Wikipedia pageviews are skipped (Netflix: no Millarworld). A company with subsidiaries but no products listed (Capgemini) is searched as itself, like a startup. Not on Wikidata: searched by name, website guessed. |
-| 2. Competitors | DuckDuckGo, plus the Brave Search API when `BRAVE_API_KEY` is set | Searches `<category> vs`, `vs <category>` and `<category> alternatives` for each category, and `"<company>" vs / competitors / alternatives` for the company itself, then reads "X vs Y" and "the best alternatives are A, B and C" from result titles and snippets. Every name is checked on Wikidata; the company's own products are dropped (Waze is Google's). Confidence = distinct websites naming it. A failing search engine is skipped, not fatal. |
-| 3. Collect | Google News RSS (month by month), Hacker News (Algolia API), the company's blog or Medium feed, YouTube (Data API if `YOUTUBE_API_KEY` is set, otherwise RSS) | Items are put into last two quarters + this quarter to date. An item is "AI" if its title matches a keyword list (see below). |
+| 1. Resolve | Wikidata, Wikipedia pageviews | Finds the company, its official links, and its products and subsidiaries. Categories with under 5% of the top category's Wikipedia pageviews are skipped (Netflix: no Millarworld). A company with subsidiaries but no products listed (Capgemini) is searched as itself, like a startup. Not on Wikidata: searched by name, website guessed from a web search, and the report's caveats say the website is a guess. |
+| 2. Competitors | DuckDuckGo, plus the Brave Search API when `BRAVE_API_KEY` is set | Searches `<category> vs`, `vs <category>` and `<category> alternatives` for each category, and `"<company>" vs / competitors / alternatives` for the company itself, then reads "X vs Y" and "the best alternatives are A, B and C" from result titles and snippets. Every name is checked on Wikidata, four lookups at a time: a business with an English Wikipedia page is preferred, and a short name may match the start or end of a longer one ("Meta" finds Meta Platforms, "Bing" finds Microsoft Bing, "Apple" finds the company, not the fruit). Works described as an album, song, video game, film, college, university or ship don't count as businesses; on 468 cached names that removed 17 junk matches without losing a real company. The company's own products are dropped (Waze is Google's). Confidence = distinct websites naming it. A failing search engine is skipped, not fatal; a Wikidata error reply is reported and never cached. |
+| 3. Collect | Google News RSS, Hacker News (Algolia API), the company's blog or Medium feed, YouTube (Data API if `YOUTUBE_API_KEY` is set, otherwise RSS) | Google News is asked month by month. Its feed returns at most about 100 items per query, so a month that comes back full is split in half and each half asked again, down to 3-day windows; a burst that gets HTTP 429 is paused and retried once. A news headline counts for a company only if it names the company; the " - Publisher" ending Google News adds doesn't count, so "... - Yahoo Finance" is not news about Yahoo. The blog feed is the one Wikidata lists, else the feed the blog or website page advertises in its HTML, else a few common feed paths. Items are put into last two quarters + this quarter to date. An item is "AI" if its headline matches a keyword list (see below). |
+| 3. Collect (releases and filings) | Hugging Face API, GitHub REST API, SEC EDGAR; ids from Wikidata (Hugging Face P12201, GitHub P2037, SEC CIK P5531) | Model uploads, new public repos (forks left out, at most 400) and 8-K/6-K filings in the same quarters, counted apart from the headlines ([details](#releases-and-filings)). Hugging Face may also be found without a Wikidata id, if the Hub has verified the organisation. Many companies have no GitHub account or CIK on Wikidata, and then that column is "-". |
 | 4. Vision | Playwright (headless Chromium) + local Qwen3.5-4B | Optional. Unverified notes only. |
 | 5. Report | Live link check, local gpt-oss-20b | Links: *live*, *unverified* (paywall, bot wall, rate limit, timeout) or *dead* (404/410/no connection: removed). Optional analysis, checked by code. ReportLab writes the PDF. |
 
-**The AI filter** is a keyword list matched on headline words, not a classifier. Ambiguous words
-(Gemini, Claude, Llama, Grok, Copilot, inference) count only next to another AI term or in model
-context ("Google Gemini", "Claude 4"), so the Gemini crypto exchange and Claude Monet stay out.
-The company's own name is removed first, so "Mistral AI" alone is not AI news.
+**The AI filter** is a keyword list matched on headline words, not a classifier. Besides the
+general terms (AI, machine learning, LLM, agentic, self-driving and so on) it includes the names
+of AI labs and products (OpenAI, Anthropic, DeepMind, watsonx, Apple Intelligence...), so
+"Microsoft invests in Anthropic" counts as AI news for Microsoft. Ambiguous words (Gemini,
+Claude, Llama, Grok, Copilot, inference) count only next to another AI term or in model context
+("Google Gemini", "Claude 4"), so the Gemini crypto exchange and Claude Monet stay out; a GPU
+mention counts only next to another term, so a gaming graphics card review stays out. The
+company's own name is removed first, so "Mistral AI" alone is not AI news.
+
+How well it works, measured on 200 stored headlines I labelled by hand (118 of them about AI):
+precision 0.99 (before the list was widened: 1.00) and recall 0.87 (before: 0.85). That sample
+had more AI headlines than real runs do; weighted to the real mix of headlines, recall is about
+0.64 (before: 0.57). So roughly one AI headline in three is still missed, most often because the
+AI product *is* the company (its own name is removed) or the headline uses a word the list
+doesn't have.
 
 **The models run locally** through llama.cpp's `llama-server`, the same setup as the creator
 dossiers (see the README's [setup](../README.md#full-setup)). No AI API key is needed. If the
@@ -382,8 +437,9 @@ model server or the model files are missing, the vision section and the caveats 
 were unavailable, and the rest of the report is built as normal. The server is stopped when the
 run ends, to free the GPU.
 
-**Wikimedia** (Wikidata and Wikipedia) requires a contact in the User-Agent of every request.
-Put a URL or email in `.env` as `CONTACT_URL=`; it is sent only to Wikimedia.
+**Wikimedia** (Wikidata and Wikipedia) and **SEC EDGAR** require a contact in the User-Agent of
+every request. Put a URL or email in `.env` as `CONTACT_URL=`; it is sent only to those two,
+every other site gets a plain User-Agent.
 
 ---
 
@@ -413,8 +469,25 @@ vision 26 s, report with analysis 113 s.
   the comparisons.
 - **The trend counts headlines.** Not deals, products, spending or revenue. It is a rule, not a
   forecast.
+- **The AI filter misses about a third of AI headlines** (recall about 0.64 on the real mix, see
+  [the AI filter](#how-it-works-step-by-step)), so counts are lower than the truth. The misses
+  hit every company, but not evenly.
+- **The loudest names are still sampled.** Even a 3-day window of Google News can be full for a
+  company like OpenAI. Counts for those periods are a sample; this is recorded in the company's
+  collection errors in `raw.json` and usually shown on its *Collection errors* line in the
+  report (which lists the first five errors).
+- **The analysis number check is loose.** A number from any headline is allowed in any analysis
+  sentence, not only in one that cites that headline (see
+  [the analysis paragraphs](#the-analysis-paragraphs)).
 - **Feeds are short.** Medium feeds give the latest 10 posts, YouTube RSS the latest 15 (set
   `YOUTUBE_API_KEY` for full history). These are shown but not used for the trend.
+- **Releases and filings depend on Wikidata ids.** SEC filings only appear for companies with a
+  CIK on Wikidata, mostly US-listed ones, and some are missing (Infosys files with the SEC but
+  has no CIK on Wikidata). Many consultancies (Infosys, Capgemini, TCS, Accenture, Wipro) have
+  no GitHub account on Wikidata, so their GitHub column is "-", which means "not looked up",
+  not "no repos".
+- **GitHub without a token** allows 60 requests an hour, which a run with several busy
+  companies can use up; the failure lands in the collection errors. Set `GITHUB_TOKEN`.
 - **Google News links are redirect pages**, so "live" means the redirect worked, not that the
   publisher page did.
 - **DuckDuckGo throttles** repeated runs. The cache helps; a throttled search is never cached.

@@ -5,10 +5,13 @@ shape so the vision and synthesis stages are source-agnostic. Real collectors
 (website/youtube/social) register themselves in P3–P5; until then the registry
 falls back to a stub so the pipeline runs end to end."""
 
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
+
+from ..config import settings
 
 # Platform tags
 YOUTUBE = "youtube"
@@ -25,6 +28,7 @@ LINKTREE = "linktree"
 PATREON = "patreon"
 KOFI = "kofi"
 TWITCH = "twitch"
+BLUESKY = "bluesky"
 WEBSITE = "website"
 
 
@@ -43,6 +47,32 @@ class SourceArtifact:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def screenshot(url: str, job_dir: Path, art: SourceArtifact) -> None:
+    """Viewport screenshot of the public page for the vision stage. Never raises:
+    a failure lands in art.errors."""
+    from playwright.sync_api import sync_playwright
+
+    from .website import UA  # imported here: website.py imports this module
+
+    shots = job_dir / "screenshots"
+    shots.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^a-z0-9]+", "-", url.lower()).strip("-")[:40] or art.platform
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_context(user_agent=UA, locale="en-US",
+                                       viewport={"width": 1280, "height": 1400}).new_page()
+            page.goto(url, wait_until="domcontentloaded",
+                      timeout=settings.social_nav_timeout_ms)
+            page.wait_for_timeout(settings.social_page_wait_ms)
+            shot = shots / f"{slug}.png"
+            page.screenshot(path=str(shot))
+            art.screenshots.append(str(shot))
+            browser.close()
+    except Exception as exc:
+        art.errors.append(f"{art.platform} screenshot: {type(exc).__name__}")
 
 
 def classify_url(url: str) -> str:
@@ -81,6 +111,8 @@ def classify_url(url: str) -> str:
         return KOFI
     if host == "twitch.tv" or host.endswith(".twitch.tv"):
         return TWITCH
+    if host == "bsky.app":
+        return BLUESKY
     return WEBSITE
 
 

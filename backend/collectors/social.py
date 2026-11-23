@@ -158,6 +158,15 @@ def collect(url: str, job_dir: Path) -> SourceArtifact:
     if art.screenshots:
         succeeded.append("screenshot-vision(queued)")
 
+    # Two methods often return the very same text (rendered og vs raw-HTML og):
+    # keep it once and record every method that produced it.
+    uniq: dict[str, dict] = {}
+    for b in art.text_blocks:
+        first = uniq.setdefault(b["text"].strip(), b)
+        if first is not b and b.get("method") not in first.get("method", "").split("+"):
+            first["method"] = f"{first.get('method', '')}+{b.get('method', '')}".strip("+")
+    art.text_blocks = list(uniq.values())
+
     art.facts["methods_attempted"] = attempted
     art.facts["methods_succeeded"] = succeeded
     art.ok = bool(art.text_blocks) or any(

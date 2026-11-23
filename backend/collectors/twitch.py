@@ -116,9 +116,12 @@ def collect(url: str, job_dir: Path) -> SourceArtifact:
         if lines:
             art.text_blocks.append({"label": "twitch profile", "text": "\n".join(lines)})
 
-        art.ok = bool(og_title or og_desc or title or channel)
+        # og tags or a follower count: the channel name comes from the URL and
+        # a bare <title>Twitch</title> is the app shell, neither is collected data.
+        art.ok = bool(og_title or og_desc or "followers" in art.facts)
+        if not art.ok:
+            art.errors.append("twitch: page rendered but carried no channel data")
     except Exception as exc:
         art.errors.append(f"twitch parse: {type(exc).__name__}: {exc}")
-        art.ok = bool(channel)
 
     return art

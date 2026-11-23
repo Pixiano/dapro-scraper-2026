@@ -29,6 +29,8 @@ MAX_TOKENS = 400
 
 def screenshot(url: str, path: Path) -> str | None:
     """Above-the-fold + a bit (1280x2000) of the main page only. -> error or None."""
+    if not url.lower().startswith(("http://", "https://")):
+        return "not an http(s) URL"  # never hand file:// and friends to the browser
     from playwright.sync_api import sync_playwright
     try:
         with sync_playwright() as p:

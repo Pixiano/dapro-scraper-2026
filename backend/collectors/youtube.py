@@ -8,11 +8,17 @@ the avatar are saved as images for the vision stage.
 
 Runs synchronously (worker threadpool) with its own httpx.Client, reusing the
 V1 quota ledger, error parsing, and input-resolution rules. Typical cost:
-~5-10 units per channel job; transcripts cost no quota."""
+~5-10 units per channel job; transcripts cost no quota.
 
+Without YOUTUBE_API_KEY it falls back to the channel's public RSS feed: the
+latest 15 videos with descriptions and transcripts, but no channel description,
+statistics or comments. The artifact says so (method, facts["view"])."""
+
+import re
 from pathlib import Path
 
 import httpx
+from bs4 import BeautifulSoup
 
 from .. import quota
 from ..config import settings
@@ -150,7 +156,7 @@ def _video_content(art: SourceArtifact, client: httpx.Client, videos: list[dict]
                      "text": _clip(text, settings.yt_transcript_char_cap)})
             elif err:
                 art.errors.append(f"transcript {vid}: {err}")
-        if i < settings.yt_comments_videos:
+        if i < settings.yt_comments_videos and settings.youtube_api_key:
             try:
                 data = _get(client, "commentThreads", part="snippet", videoId=vid,
                             order="relevance", textFormat="plainText",
@@ -176,8 +182,75 @@ def _video_content(art: SourceArtifact, client: httpx.Client, videos: list[dict]
 
 CHANNEL_PARTS = "snippet,statistics,brandingSettings,topicDetails,contentDetails"
 
+# Where a channel or watch page states its channel id, most reliable first: the
+# RSS <link> and externalId are the page's own channel; "channelId" on a channel
+# page can be a featured channel, on a watch page it is the uploader.
+_CHANNEL_ID_RES = (r"channel_id=(UC[\w-]{22})", r'"externalId":"(UC[\w-]{22})"',
+                   r'"channelId":"(UC[\w-]{22})"')
+
+
+def _collect_rss(url: str, job_dir: Path) -> SourceArtifact:
+    """No API key: the reduced view from the channel's public RSS feed."""
+    art = SourceArtifact(url=url, platform=YOUTUBE, method="rss+timedtext")
+    art.facts["view"] = ("reduced (no YOUTUBE_API_KEY): RSS feed, latest 15 videos only; "
+                         "no channel description, subscriber counts or comments")
+    imgs_dir = job_dir / "images"
+    imgs_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        parsed = parse_input(url)
+        with httpx.Client(timeout=20, headers={"User-Agent": UA},
+                          follow_redirects=True) as client:
+            cid = parsed.value
+            if parsed.kind != "channel_id":  # the id is in the public page's HTML
+                path = {"video_id": "watch?v=", "username": "user/",
+                        "name": "@"}.get(parsed.kind, "") + parsed.value
+                html = client.get(f"https://www.youtube.com/{path}").text
+                m = next((m for rx in _CHANNEL_ID_RES if (m := re.search(rx, html))), None)
+                if not m:
+                    raise YouTubeError(404, "channelNotFound",
+                                       f"No channel id on the page for '{url}'.")
+                cid = m.group(1)
+            r = client.get(f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}")
+            if r.status_code != 200:
+                raise YouTubeError(r.status_code, "rssUnavailable",
+                                   f"Channel feed for {cid}: HTTP {r.status_code}.")
+            soup = BeautifulSoup(r.text, "xml")
+
+            def text(el, name):
+                t = el.find(name)
+                return t.get_text(strip=True) if t else ""
+
+            art.facts["channel_id"] = cid
+            if text(soup, "title"):
+                art.facts["channel_title"] = text(soup, "title")
+            videos, lines = [], []
+            for e in soup.find_all("entry")[:settings.yt_videos_recent]:
+                thumb, stats = e.find("thumbnail"), e.find("statistics")
+                videos.append({"id": text(e, "videoId"), "snippet": {
+                    "title": text(e, "title"), "description": text(e, "description"),
+                    "thumbnails": {"high": {"url": thumb.get("url")}} if thumb else {}}})
+                views = f", {stats.get('views')} views" if stats else ""
+                lines.append(f"- {text(e, 'title')} ({text(e, 'published')[:10]}{views})")
+            if lines:
+                art.text_blocks.append(
+                    {"label": f"recent videos (RSS, latest {len(lines)})",
+                     "text": "\n".join(lines)})
+            if parsed.kind == "video_id" and all(v["id"] != parsed.value for v in videos):
+                # an older video than the feed reaches: still fetch its transcript
+                videos.insert(0, {"id": parsed.value,
+                                  "snippet": {"title": f"video {parsed.value}"}})
+            _video_content(art, client, videos, imgs_dir)
+    except YouTubeError as exc:
+        art.errors.append(f"{exc.reason}: {exc.message}")
+    except Exception as exc:
+        art.errors.append(f"{type(exc).__name__}: {exc}")
+    art.ok = bool(art.text_blocks)
+    return art
+
 
 def collect(url: str, job_dir: Path) -> SourceArtifact:
+    if not settings.youtube_api_key:
+        return _collect_rss(url, job_dir)
     art = SourceArtifact(url=url, platform=YOUTUBE, method="data_api+timedtext")
     imgs_dir = job_dir / "images"
     imgs_dir.mkdir(parents=True, exist_ok=True)

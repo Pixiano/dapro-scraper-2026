@@ -30,7 +30,7 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 from ..config import settings
-from .base import KOFI, PATREON, SourceArtifact
+from .base import KOFI, PATREON, SourceArtifact, screenshot as _screenshot
 from .website import UA, extract_text
 
 _SUPPORTER_RE = re.compile(r"([\d,]+)\s+(supporters?|members?|patrons?)", re.I)
@@ -63,26 +63,6 @@ def _render(url: str) -> str:
             return page.content()
         finally:
             browser.close()
-
-
-def _screenshot(url: str, job_dir: Path, art: SourceArtifact) -> None:
-    shots = job_dir / "screenshots"
-    shots.mkdir(parents=True, exist_ok=True)
-    slug = re.sub(r"[^a-z0-9]+", "-", url.lower()).strip("-")[:40] or "monetization"
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_context(user_agent=UA, locale="en-US",
-                                       viewport={"width": 1280, "height": 1400}).new_page()
-            page.goto(url, wait_until="domcontentloaded",
-                      timeout=settings.social_nav_timeout_ms)
-            page.wait_for_timeout(settings.social_page_wait_ms)
-            shot = shots / f"{slug}.png"
-            page.screenshot(path=str(shot))
-            art.screenshots.append(str(shot))
-            browser.close()
-    except Exception as exc:
-        art.errors.append(f"monetization screenshot: {type(exc).__name__}")
 
 
 # ---------------------------------------------------------------------------

@@ -20,13 +20,9 @@ class Settings(BaseSettings):
     ttl_list_s: int = 24 * 3600
     ttl_captions_s: int = 24 * 3600
     ttl_static_s: int = 30 * 24 * 3600
-    ttl_negative_s: int = 3600
 
     rate_fresh: str = "10/minute"
     rate_cached: str = "60/minute"
-    rate_expensive: str = "3/minute"
-
-    enable_instagram: bool = False
 
     # --- V2: local LLM (llama.cpp) ---
     lmstudio_models_dir: Path = Path.home() / ".lmstudio" / "models"
@@ -51,11 +47,12 @@ class Settings(BaseSettings):
     llm_ctx_text: int = 40960    # synthesis: briefs from many sources + reasoning + dossier (40k)
     llm_ngl: int = 99  # GPU layers to offload; 99 = all
     llm_start_timeout_s: int = 180
-    models_sequential: bool = True  # 16 GB VRAM → one model resident at a time
+
+    collect_concurrency: int = 4    # collectors (one Chromium each) running at once
 
     # --- V2: WebsiteCollector ---
     site_page_cap: int = 5          # pages per site incl. main (screenshot each)
-    site_image_cap: int = 6         # meaningful images downloaded per site
+    site_image_cap: int = 3         # meaningful images downloaded per site (~10 s of vision each)
     site_text_cap: int = 20000      # chars of extracted text per page
     site_nav_timeout_ms: int = 20000
 
@@ -74,8 +71,12 @@ class Settings(BaseSettings):
     # --- V2b: additional bespoke collectors ---
     github_repos: int = 20            # top repos listed (by stars)
     github_readme_chars: int = 6000   # profile/top-repo README text cap
+    github_token: str = ""            # optional: 60 -> 5,000 API requests an hour
     medium_articles: int = 15         # recent Medium posts from the feed
     substack_posts: int = 15          # recent Substack posts from the feed
+    feed_post_chars: int = 4000       # Medium/Substack: body text kept per post
+    feed_total_chars: int = 30000     # ...and per source, all posts together
+    bluesky_posts: int = 25           # recent Bluesky posts fetched
     reddit_items: int = 25            # recent Reddit posts fetched
     news_items: int = 15              # Google News headlines per entity
     enable_news: bool = True          # auto-add an entity-name news feed
@@ -93,7 +94,9 @@ class Settings(BaseSettings):
     vision_blank_stddev: float = 3.0
 
     # --- V2: Synthesis stage (map-reduce via gpt-oss) ---
-    synthesis_chunk_chars: int = 6000   # per map call (~1.5-2k tokens)
+    # Per map call. 20k chars is ~5k tokens (10k at a dense 2 chars/token); plus
+    # ~1k of prompt and the 1.3k reply budget that is well inside llm_ctx_text.
+    synthesis_chunk_chars: int = 20000
     # gpt-oss at high reasoning spends tokens THINKING before the answer, so these
     # budgets must cover reasoning + output. Raised to survive 6+ source jobs where
     # the dossier body (findings-per-source) grows with each link.

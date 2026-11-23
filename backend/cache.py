@@ -1,10 +1,7 @@
-"""SQLite TTL cache with negative caching.
+"""SQLite TTL cache.
 
 Rows store their `kind`; TTLs are looked up from settings at read time so config
-changes apply to existing rows. Negative results (not found, comments disabled,
-subscriptions private) are cached as payloads with a `__negative__` marker and
-re-raised as the original typed error on cache hits — retries are quota-free.
-"""
+changes apply to existing rows."""
 
 import json
 import sqlite3
@@ -38,8 +35,6 @@ def ttl_for(kind: str) -> int:
         "list": settings.ttl_list_s,
         "captions": settings.ttl_captions_s,
         "static": settings.ttl_static_s,
-        "negative": settings.ttl_negative_s,
-        "ig_fail": settings.ttl_negative_s,
     }[kind]
 
 
@@ -75,33 +70,3 @@ def set(key: str, kind: str, payload) -> None:
         conn.commit()
     finally:
         conn.close()
-
-
-async def cached_call(key: str, kind: str, produce, force: bool = False):
-    """Cache-through wrapper: returns (payload, cached: bool, fetched_at_iso).
-
-    `produce` is an async callable hitting the API. Negative-cacheable
-    YouTubeErrors are stored and re-raised on subsequent hits.
-    """
-    from .youtube.client import YouTubeError  # deferred to avoid import cycle
-
-    if not force:
-        hit = get(key)
-        if hit is not None:
-            payload, fetched_at = hit
-            if isinstance(payload, dict) and payload.get("__negative__"):
-                raise YouTubeError(payload["status"], payload["reason"], payload["message"])
-            return payload, True, fetched_at
-    try:
-        data = await produce()
-    except YouTubeError as exc:
-        if exc.negative:
-            set(key, "negative", {
-                "__negative__": True,
-                "status": exc.status,
-                "reason": exc.reason,
-                "message": exc.message,
-            })
-        raise
-    set(key, kind, data)
-    return data, False, _iso(time.time())

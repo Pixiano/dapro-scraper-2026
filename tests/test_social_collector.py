@@ -68,6 +68,29 @@ def test_facebook_uses_httpx_og(monkeypatch, tmp_path):
     assert "50M likes" in art.text_blocks[0]["text"]
 
 
+def test_identical_text_from_two_methods_is_kept_once(monkeypatch, tmp_path):
+    blurb = "NASA\nOfficial NASA page. 50M likes."
+
+    def fake_pw(url, job_dir, art):
+        art.text_blocks.append({"label": "social og-summary", "text": blurb,
+                                "method": "playwright-loggedout"})
+        return True
+
+    def fake_og(url, art):
+        art.text_blocks.append({"label": "facebook og-summary (raw html)",
+                                "text": blurb + "\n", "method": "httpx-og"})
+        art.text_blocks.append({"label": "other", "text": "something else",
+                                "method": "httpx-og"})
+        return True
+
+    monkeypatch.setattr(social, "_method_playwright", fake_pw)
+    monkeypatch.setattr(social, "_method_httpx_og", fake_og)
+    art = social.collect("https://facebook.com/NASA", tmp_path)
+
+    assert [b["text"].strip() for b in art.text_blocks] == [blurb, "something else"]
+    assert art.text_blocks[0]["method"] == "playwright-loggedout+httpx-og"
+
+
 def test_total_failure_does_not_crash(monkeypatch, tmp_path):
     monkeypatch.setattr(social, "_method_playwright", lambda u, j, a: (
         a.errors.append("playwright: boom") or False))

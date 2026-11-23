@@ -1,15 +1,19 @@
 """Vision stage: turn each artifact's screenshots and images into text notes.
 
-Runs on the local Qwen3.5-9B vision model (chosen over gemma-4-12B on a real
-screenshot bench — see docs/plans/PLAN-V2-AGGREGATOR.md §8). The model loads once for the
-whole stage and is swapped out automatically when synthesis needs the text model.
+Runs on the local Qwen vision model set in config (llm_vision_model; the family
+was chosen over gemma-4-12B on a real screenshot bench — see
+docs/plans/PLAN-V2-AGGREGATOR.md §8). The model loads once for the whole stage and
+is swapped out automatically when synthesis needs the text model. Descriptions
+are cached by image bytes + model + prompt, so a re-run only pays for new images.
 
 Prompts explicitly forbid guessing: a fabricated view count or name would be
 laundered into confident "insight" by the downstream synthesis model, which is
 the worst failure mode this pipeline has."""
 
+import hashlib
 from pathlib import Path
 
+from . import cache
 from .config import settings
 from .llm import client
 
@@ -70,6 +74,21 @@ def _dom_text_len(artifact: dict) -> int:
     return sum(len(b.get("text") or "") for b in artifact.get("text_blocks") or [])
 
 
+def _describe(path: str, prompt: str) -> str:
+    """client.describe_image through the SQLite cache (kind "static": 30 days)."""
+    key = "vision:" + hashlib.sha256(
+        Path(path).read_bytes()
+        + f"|{settings.llm_vision_model}|{prompt}".encode()).hexdigest()
+    hit = cache.get(key)
+    if hit:
+        return hit[0]
+    desc = (client.describe_image(path, prompt,
+                                  max_tokens=settings.vision_max_tokens) or "").strip()
+    if desc:  # an empty reply is not worth remembering
+        cache.set(key, "static", desc)
+    return desc
+
+
 def analyze_artifact(artifact: dict) -> dict:
     notes: list[dict] = []
     text_rich = _dom_text_len(artifact) >= TEXT_RICH_CHARS
@@ -88,9 +107,7 @@ def analyze_artifact(artifact: dict) -> dict:
         else:
             prompt = SCREENSHOT_PROMPT  # thin/no text (e.g. login-walled social)
         try:
-            desc = client.describe_image(path, prompt,
-                                         max_tokens=settings.vision_max_tokens)
-            desc = (desc or "").strip()
+            desc = _describe(path, prompt)
             if desc:
                 notes.append({"ref": ref, "kind": kind, "description": desc})
             else:
@@ -104,4 +121,5 @@ def analyze_artifact(artifact: dict) -> dict:
 
 
 def analyze(artifacts: list[dict]) -> list[dict]:
+    cache.init_db()  # no-op when the app already created the table
     return [analyze_artifact(a) for a in artifacts]

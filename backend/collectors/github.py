@@ -1,10 +1,11 @@
 """Bespoke GitHub collector.
 
 GitHub's public REST API (api.github.com) exposes a clean, structured view of a
-user or organization: profile fields, the top repositories by stars, and the
-profile README. No scraping or auth is needed for public data, so we read the API
-directly for facts and text, and use Playwright only to capture a screenshot of
-the profile page for the vision stage.
+user or organization: profile fields, the top repositories by stars, the profile
+README and the READMEs of the top 3 repositories. No scraping or auth is needed
+for public data (an optional GITHUB_TOKEN only raises the rate limit), so we read
+the API directly for facts and text, and use Playwright only to capture a
+screenshot of the profile page for the vision stage.
 
 Best-effort and contained: unauthenticated API calls are rate-limited (403 with
 X-RateLimit-Remaining: 0) and missing resources 404 — both are handled quietly.
@@ -15,10 +16,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from playwright.sync_api import sync_playwright
 
 from ..config import settings
-from .base import GITHUB, SourceArtifact
+from .base import GITHUB, SourceArtifact, screenshot as _screenshot
 from .website import UA
 
 _API = "https://api.github.com"
@@ -30,26 +30,6 @@ def _login_from_url(url: str) -> str | None:
     return parts[0] if parts else None
 
 
-def _screenshot(url: str, job_dir: Path, art: SourceArtifact) -> None:
-    shots = job_dir / "screenshots"
-    shots.mkdir(parents=True, exist_ok=True)
-    login = _login_from_url(url) or "github"
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_context(user_agent=UA, locale="en-US",
-                                       viewport={"width": 1280, "height": 1400}).new_page()
-            page.goto(url, wait_until="domcontentloaded",
-                      timeout=settings.social_nav_timeout_ms)
-            page.wait_for_timeout(1800)
-            shot = shots / f"github-{login}.png"
-            page.screenshot(path=str(shot))
-            art.screenshots.append(str(shot))
-            browser.close()
-    except Exception as exc:
-        art.errors.append(f"github screenshot: {type(exc).__name__}")
-
-
 def collect(url: str, job_dir: Path) -> SourceArtifact:
     art = SourceArtifact(url=url, platform=GITHUB, method="github_api")
     login = _login_from_url(url)
@@ -57,10 +37,12 @@ def collect(url: str, job_dir: Path) -> SourceArtifact:
         art.errors.append("github: no login in URL")
         return art
 
+    headers = {"User-Agent": UA, "Accept": "application/vnd.github+json"}
+    if settings.github_token:
+        headers["Authorization"] = f"Bearer {settings.github_token}"
+    top: list[str] = []
     try:
-        with httpx.Client(headers={"User-Agent": UA,
-                                   "Accept": "application/vnd.github+json"},
-                          timeout=15, follow_redirects=True) as c:
+        with httpx.Client(headers=headers, timeout=15, follow_redirects=True) as c:
             # 1. Profile
             r = c.get(f"{_API}/users/{login}")
             if r.status_code == 404:
@@ -87,12 +69,16 @@ def collect(url: str, job_dir: Path) -> SourceArtifact:
                 if bio:
                     art.text_blocks.append({"label": "bio", "text": bio})
 
-            # 2. Repositories
-            rr = c.get(f"{_API}/users/{login}/repos"
-                       f"?sort=stars&direction=desc&per_page={settings.github_repos}")
+            # 2. Repositories by stars. Search, because the list-repos endpoint
+            # cannot sort by stars; user: matches organisations too. Forks are
+            # left out by search, which suits "their own top work".
+            rr = c.get(f"{_API}/search/repositories?q=user:{login}"
+                       f"&sort=stars&order=desc&per_page={settings.github_repos}")
             if rr.status_code == 200:
-                repos = rr.json()
+                repos = rr.json().get("items")
                 if isinstance(repos, list) and repos:
+                    top = [x["name"] for x in repos if x.get("name")
+                           and x["name"].lower() != login.lower()][:3]
                     langs: Counter[str] = Counter()
                     lines = []
                     for repo in repos:
@@ -119,15 +105,18 @@ def collect(url: str, job_dir: Path) -> SourceArtifact:
             else:
                 art.errors.append(f"github: repos fetch HTTP {rr.status_code}")
 
-            # 3. Profile README (404 is normal — ignore quietly)
-            rm = c.get(f"{_API}/repos/{login}/{login}/readme",
-                       headers={"Accept": "application/vnd.github.raw+json"})
-            if rm.status_code == 200:
-                readme = (rm.text or "").strip()
-                if readme:
-                    art.text_blocks.append(
-                        {"label": "profile README",
-                         "text": readme[:settings.github_readme_chars]})
+            # 3. READMEs: the profile one (repo <login>/<login>) and the top 3
+            # repos by stars (404 is normal — ignore quietly)
+            for label, repo in [("profile README", login)] + [
+                    (f"README: {name}", name) for name in top]:
+                rm = c.get(f"{_API}/repos/{login}/{repo}/readme",
+                           headers={"Accept": "application/vnd.github.raw+json"})
+                if rm.status_code == 200:
+                    readme = (rm.text or "").strip()
+                    if readme:
+                        art.text_blocks.append(
+                            {"label": label,
+                             "text": readme[:settings.github_readme_chars]})
     except Exception as exc:
         art.errors.append(f"github: {type(exc).__name__}: {exc}")
 

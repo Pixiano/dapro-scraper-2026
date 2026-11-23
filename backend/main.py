@@ -1,4 +1,4 @@
-import time
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -8,18 +8,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from slowapi.errors import RateLimitExceeded
-
-import re
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import cache, jobs, pdf, quota, worker
 from .company import web as company_web
 from .config import settings
-from .instagram import service as instagram_service
 from .llm import server as llm_server
-from .quota import QuotaExhausted
 from .ratelimit import limiter, rate_limit_handler
-from .youtube import client, resolver, service
-from .youtube.client import YouTubeError
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -29,143 +24,19 @@ async def lifespan(app: FastAPI):
     cache.init_db()
     quota.init_db()
     jobs.init_db()
+    jobs.fail_unfinished()  # the queue is in memory: nothing will ever resume them
     worker.start()
     yield
     await worker.stop()
     llm_server.stop()
-    await client.aclose()
 
 
 app = FastAPI(title="Entity Research Aggregator", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
-
-
-@app.exception_handler(YouTubeError)
-async def youtube_error_handler(request: Request, exc: YouTubeError):
-    return JSONResponse(
-        status_code=exc.status,
-        content={"error": {"reason": exc.reason, "message": exc.message},
-                 "quota": quota.status()},
-    )
-
-
-@app.exception_handler(QuotaExhausted)
-async def quota_error_handler(request: Request, exc: QuotaExhausted):
-    return JSONResponse(
-        status_code=429,
-        content={"error": {"reason": "quotaBudgetExhausted", "message": str(exc)},
-                 "quota": quota.status()},
-    )
-
-
-def envelope(data, cached: bool, fetched_at: str) -> dict:
-    return {"data": data, "cached": cached, "fetched_at": fetched_at,
-            "quota": quota.status()}
-
-
-def cost_gate(resource: str) -> JSONResponse:
-    cost = quota.cost_of(resource)
-    return JSONResponse(
-        status_code=400,
-        content={"error": {
-            "reason": "confirmationRequired",
-            "message": f"{resource}.list costs {cost} quota units. "
-                       f"Repeat the request with confirm=true to proceed."},
-            "cost": cost, "quota": quota.status()},
-    )
-
-
-# ---------------------------------------------------------------- resolution
-
-@app.get("/api/resolve")
-@limiter.limit(settings.rate_fresh)
-async def api_resolve(request: Request, q: str, refresh: bool = False):
-    data, cached, fetched = await resolver.resolve(q, force=refresh)
-    return envelope(data, cached, fetched)
-
-
-# ------------------------------------------------------------------- channel
-
-@app.get("/api/channel/{channel_id}")
-@limiter.limit(settings.rate_fresh)
-async def api_channel(request: Request, channel_id: str, refresh: bool = False):
-    data, cached, fetched = await service.channel_snapshot(channel_id, force=refresh)
-    return envelope(data, cached, fetched)
-
-
-@app.get("/api/channel/{channel_id}/videos")
-@limiter.limit(settings.rate_cached)
-async def api_channel_videos(request: Request, channel_id: str,
-                             page_token: str | None = None, refresh: bool = False):
-    data, cached, fetched = await service.channel_videos(channel_id, page_token, force=refresh)
-    return envelope(data, cached, fetched)
-
-
-@app.get("/api/channel/{channel_id}/activities")
-@limiter.limit(settings.rate_cached)
-async def api_activities(request: Request, channel_id: str, refresh: bool = False):
-    data, cached, fetched = await service.activities(channel_id, force=refresh)
-    return envelope(data, cached, fetched)
-
-
-@app.get("/api/channel/{channel_id}/subscriptions")
-@limiter.limit(settings.rate_cached)
-async def api_subscriptions(request: Request, channel_id: str, refresh: bool = False):
-    data, cached, fetched = await service.subscriptions(channel_id, force=refresh)
-    return envelope(data, cached, fetched)
-
-
-# --------------------------------------------------------------------- video
-
-@app.get("/api/video/{video_id}")
-@limiter.limit(settings.rate_fresh)
-async def api_video(request: Request, video_id: str, refresh: bool = False):
-    data, cached, fetched = await service.video_detail(video_id, force=refresh)
-    return envelope(data, cached, fetched)
-
-
-@app.get("/api/video/{video_id}/comments")
-@limiter.limit(settings.rate_cached)
-async def api_comments(request: Request, video_id: str, page_token: str | None = None,
-                       order: str = "relevance", refresh: bool = False):
-    data, cached, fetched = await service.comments(video_id, page_token, order, force=refresh)
-    return envelope(data, cached, fetched)
-
-
-@app.get("/api/comments/{parent_id}/replies")
-@limiter.limit(settings.rate_cached)
-async def api_replies(request: Request, parent_id: str, page_token: str | None = None,
-                      refresh: bool = False):
-    data, cached, fetched = await service.comment_replies(parent_id, page_token, force=refresh)
-    return envelope(data, cached, fetched)
-
-
-@app.get("/api/video/{video_id}/captions")
-@limiter.limit(settings.rate_expensive)
-async def api_captions(request: Request, video_id: str, confirm: bool = False,
-                       refresh: bool = False):
-    if not confirm:
-        return cost_gate("captions")
-    data, cached, fetched = await service.captions(video_id, force=refresh)
-    return envelope(data, cached, fetched)
-
-
-# -------------------------------------------------------------------- extras
-
-@app.get("/api/search")
-@limiter.limit(settings.rate_expensive)
-async def api_search(request: Request, q: str, type: str = "channel",
-                     confirm: bool = False, refresh: bool = False):
-    if not confirm:
-        return cost_gate("search")
-    data, cached, fetched = await service.search(q, type, force=refresh)
-    return envelope(data, cached, fetched)
-
-
-@app.get("/api/quota")
-async def api_quota():
-    return {"quota": quota.status()}
+# Localhost-only tool: refusing other Host headers closes DNS rebinding.
+# (Tests: TestClient(app, base_url="http://localhost").)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
 
 
 # ---------------------------------------------------------------------- jobs
@@ -218,6 +89,10 @@ async def api_create_job(request: Request, body: JobCreate = Body(...)):
     if not links:
         return JSONResponse(status_code=400, content={"error": {
             "reason": "noLinks", "message": "Provide at least one link."}})
+    for ln in links:
+        if err := await run_in_threadpool(company_web.url_error, ln):
+            return JSONResponse(status_code=400, content={"error": {
+                "reason": "badLink", "message": f"{ln}: {err}"}})
     job_id = jobs.create({"links": links, "entity_name": body.entity_name})
     await worker.enqueue(job_id)
     return {"job_id": job_id, "status": jobs.QUEUED}
@@ -226,7 +101,11 @@ async def api_create_job(request: Request, body: JobCreate = Body(...)):
 @app.get("/api/jobs")
 @limiter.limit(settings.rate_cached)
 async def api_list_jobs(request: Request):
-    return {"jobs": [_job_view(j) for j in jobs.recent()]}
+    # only what frontend/app.js loadRecent() reads; artifacts come from /api/jobs/{id}
+    return {"jobs": [{"id": j["id"], "status": j["status"], "inputs": j["inputs"],
+                      "created_at": j["created_at"],
+                      "dossier_available": bool(j["dossier_path"])}
+                     for j in jobs.recent()]}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -268,6 +147,11 @@ async def api_get_pdf(request: Request, job_id: str):
 async def api_job_file(job_id: str, path: str):
     """Serve a screenshot/image from a job folder. Path is relative to that
     folder and validated, so it can't escape via traversal."""
+    # The id must be a real job (checked BEFORE job_dir, which creates the folder):
+    # "..", made-up ids and absolute/UNC paths all get the same 404.
+    if jobs.get(job_id) is None or Path(path).anchor:
+        return JSONResponse(status_code=404, content={"error": {
+            "reason": "fileNotFound", "message": "No such artifact file."}})
     base = jobs.job_dir(job_id).resolve()
     try:
         target = (base / path).resolve()
@@ -278,28 +162,6 @@ async def api_job_file(job_id: str, path: str):
         return JSONResponse(status_code=404, content={"error": {
             "reason": "fileNotFound", "message": "No such artifact file."}})
     return FileResponse(str(target))
-
-
-@app.get("/api/instagram/{username}")
-@limiter.limit(settings.rate_fresh)
-async def api_instagram(request: Request, username: str, refresh: bool = False):
-    if not settings.enable_instagram:
-        return JSONResponse(
-            status_code=503,
-            content={"error": {
-                "reason": "instagramDisabled",
-                "message": "Instagram tier is off. Set ENABLE_INSTAGRAM=true in .env "
-                           "and install instaloader."}},
-        )
-    key = f"ig:{username.strip().lower()}"
-    if not refresh:
-        hit = cache.get(key)
-        if hit is not None:
-            payload, fetched_at = hit
-            return envelope(payload, True, fetched_at)
-    data = await run_in_threadpool(instagram_service.fetch_profile, username.strip())
-    cache.set(key, "list" if data.get("available") else "ig_fail", data)
-    return envelope(data, False, cache._iso(time.time()))
 
 
 app.include_router(company_web.router)  # company reports: /company.html

@@ -1,16 +1,12 @@
-"""Input resolution WITHOUT search.list (which costs 100 units).
+"""Input parsing for YouTube references.
 
 Accepts channel IDs, @handles, legacy usernames, bare names, and every common
-YouTube URL form, and resolves to a channel or video via channels.list /
-videos.list lookups (1 unit each; worst case 2 for a bare name). Successful
-resolutions are cached 30 days (IDs are stable); misses are negative-cached."""
+YouTube URL form, and says which kind it is. No network."""
 
 import re
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
-from .. import cache
-from . import client
 from .client import YouTubeError
 
 CHANNEL_ID_RE = re.compile(r"^UC[0-9A-Za-z_-]{22}$")
@@ -78,56 +74,3 @@ def _parse_url(q: str) -> ParsedInput:
     if first.startswith("@"):
         return ParsedInput("handle", first)
     raise _bad(f"Unrecognized YouTube URL form: /{first}")
-
-
-def _thumb(snippet: dict) -> str | None:
-    thumbs = snippet.get("thumbnails") or {}
-    for k in ("medium", "high", "default"):
-        if k in thumbs:
-            return thumbs[k].get("url")
-    return None
-
-
-async def resolve(raw: str, force: bool = False):
-    """Returns (result, cached, fetched_at). result = {type, id, title, thumbnail, ...}."""
-    parsed = parse_input(raw)
-    key = f"resolve:{parsed.kind}:{parsed.value.lower()}"
-
-    async def produce():
-        if parsed.kind == "video_id":
-            data = await client.api_get("videos", part="snippet", id=parsed.value)
-            items = data.get("items") or []
-            if not items:
-                raise YouTubeError(404, "videoNotFound",
-                                   f"No video with ID {parsed.value}.", negative=True)
-            sn = items[0]["snippet"]
-            return {
-                "type": "video", "id": parsed.value, "title": sn.get("title"),
-                "thumbnail": _thumb(sn), "channelId": sn.get("channelId"),
-                "channelTitle": sn.get("channelTitle"),
-            }
-
-        attempts = {
-            "channel_id": [{"id": parsed.value}],
-            "handle": [{"forHandle": parsed.value}],
-            "username": [{"forUsername": parsed.value}],
-            "name": [{"forHandle": "@" + parsed.value}, {"forUsername": parsed.value}],
-        }[parsed.kind]
-        for params in attempts:
-            data = await client.api_get("channels", part="snippet", **params)
-            items = data.get("items") or []
-            if items:
-                it = items[0]
-                sn = it["snippet"]
-                return {
-                    "type": "channel", "id": it["id"], "title": sn.get("title"),
-                    "thumbnail": _thumb(sn), "customUrl": sn.get("customUrl"),
-                }
-        raise YouTubeError(
-            404, "channelNotFound",
-            f"No channel found for '{raw.strip()}'. Try the exact @handle or a channel URL "
-            "(name lookup does not use YouTube search).",
-            negative=True,
-        )
-
-    return await cache.cached_call(key, "static", produce, force=force)

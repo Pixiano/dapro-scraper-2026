@@ -6,6 +6,7 @@ one GPU, so concurrent jobs would thrash VRAM. Jobs queue up and run in order.""
 import asyncio
 
 from . import jobs, pipeline
+from .llm import server as llm_server
 
 _queue: asyncio.Queue | None = None
 _task: asyncio.Task | None = None
@@ -15,11 +16,15 @@ async def _loop() -> None:
     assert _queue is not None
     while True:
         job_id = await _queue.get()
+        # a company web run may hold the model server; polled so shutdown can cancel
+        while not llm_server.run_lock.acquire(blocking=False):
+            await asyncio.sleep(1)
         try:
             await pipeline.run_job(job_id)
         except Exception as exc:  # pipeline handles its own errors; this is a backstop
             jobs.update(job_id, status=jobs.ERROR, error=f"worker: {exc}")
         finally:
+            llm_server.run_lock.release()
             _queue.task_done()
 
 

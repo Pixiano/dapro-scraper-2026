@@ -1,5 +1,6 @@
 """Live competitor discovery: "<category> vs" on Brave + DuckDuckGo (ddgs) together,
-"X vs Y" names pulled from result titles, each verified on Wikidata. No LLM.
+"X vs Y" and "alternatives are A, B" names pulled from result titles and snippets,
+each verified on Wikidata. No LLM.
 
 Confidence = distinct domains whose result titles name the competitor:
 >=3 high, 2 medium, 1 low (low -> appendix, not the main list)."""
@@ -7,6 +8,7 @@ Confidence = distinct domains whose result titles name the competitor:
 import html
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 import httpx
@@ -30,7 +32,7 @@ def _brave(query: str, errors: list[str]) -> list[dict]:
     global _last_brave
     if not settings.brave_api_key:
         return []
-    # ponytail: free tier is 1 req/s; a global spacer is enough for a sequential CLI
+    # ponytail: Brave allows 1 req/s; a global spacer is enough for a sequential CLI
     time.sleep(max(0.0, 1.1 - (time.monotonic() - _last_brave)))
     _last_brave = time.monotonic()
     try:
@@ -111,8 +113,9 @@ def _take(words: list[str], from_end: bool) -> str:
     if from_end:
         picked.reverse()
 
-    def junk(w: str) -> bool:  # "2026", stray "&", title-case filler ("The", "Showdown")
-        return w.isdigit() or w in "&+" or w.lower().strip("?!.:") in EDGE | STOP
+    def junk(w: str) -> bool:  # "2026", "2026:", stray "&", title-case filler ("The", "Showdown")
+        w = w.strip("?!.:")
+        return w.isdigit() or w in "&+" or w.lower() in EDGE | STOP
     while picked and junk(picked[0]):
         picked.pop(0)
     while picked and junk(picked[-1]):
@@ -140,7 +143,9 @@ def names_from_title(title: str) -> list[str]:
     return out
 
 
-LIST = re.compile(r"\b(?:alternatives|competitors|rivals|similar companies|peers)\b"
+_KW = r"(?:alternatives|competitors|rivals|similar companies|peers)"
+# the keyword may come twice: "Competitors and Alternatives - Accenture, Infosys"
+LIST = re.compile(rf"\b{_KW}(?:\s*(?:and|or|&|/)\s*{_KW})?\b"
                   r"(?: to [^.:—–]*?)?(?: are| include| including| like| such as)?\s*[:—–-]?\s+"
                   r"(.+?)(?:\.\s|\.$|$)", re.I)
 STOP = {"top", "best", "compare", "comparison", "review", "reviews", "alternatives",
@@ -180,11 +185,10 @@ def _makers(e: dict) -> set[str]:
 
 
 def _lookup(n: str, errors: list[str]) -> str | None:
-    """Exact Wikidata label/alias match; else drop one outer word and retry
-    ("ChatGPT Showdown" -> "ChatGPT")."""
+    """The Wikidata business named this (wd.search, exact + business); else drop
+    one outer word and retry ("ChatGPT Showdown" -> "ChatGPT")."""
     w = n.split()
     for cand in [n] + ([" ".join(w[1:]), " ".join(w[:-1])] if len(w) > 1 else []):
-        # business: "Apple" is the company here, not the fruit (the first hit)
         if q := wd.search(cand, errors, business=True, exact=True):
             return q
     return None
@@ -195,7 +199,9 @@ def _verify(names: list[str], own: set[str], own_names: list[str],
     """-> (name -> Wikidata entity, names that are the company's own).
     Names in neither are "not on Wikidata" (startups) or matched the wrong
     thing (a person, a generic class) and are kept only as unverified."""
-    hits = {n: _lookup(n, errors) for n in names}
+    # ponytail: 4 threads, polite to Wikidata; raise if uncached runs stay slow
+    with ThreadPoolExecutor(4) as ex:
+        hits = dict(zip(names, ex.map(lambda n: _lookup(n, errors), names)))
     ents = wd.get_entities(sorted({q for q in hits.values() if q}), errors)
     out, own_hit = {}, set()
     for n, q in hits.items():
@@ -386,7 +392,9 @@ def from_names(names: list[str], errors: list[str]) -> list[dict]:
     Wikidata are kept (the user vouched for them), marked on_wikidata=False."""
     out: list[dict] = []
     for n in names:
-        q = wd.search(n, errors)
+        # the business named this, as for found names ("Meta" -> Meta Platforms, "Apple" ->
+        # Apple Inc.); else the plain top hit: the user named it on purpose
+        q = wd.search(n, errors, business=True, exact=True) or wd.search(n, errors)
         e = wd.get_entities([q], errors).get(q) if q else None
         out.append({"qid": q if e else "name:" + _norm(n), "label": wd.label(e) if e else n,
                     "name": n,

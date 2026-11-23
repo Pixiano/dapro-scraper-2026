@@ -115,3 +115,11 @@ def test_render_exception_contained(monkeypatch, tmp_path):
 
     assert art.ok is False
     assert any("RuntimeError" in e for e in art.errors)
+
+
+def test_shell_page_without_channel_data_is_not_ok(canned, tmp_path):
+    canned(BARE_HTML)
+    art = tv.collect("https://www.twitch.tv/somestreamer", tmp_path)
+
+    assert art.ok is False
+    assert any("no channel data" in e for e in art.errors)

@@ -411,9 +411,16 @@ def test_brave_titles_lose_their_highlight_tags(monkeypatch):
 
 def test_rival_lookup_prefers_a_business_and_low_names_add_up(monkeypatch):
     # a rival named "Apple" is the company, not the fruit that Wikidata lists first
+    # (live API shape: the match text is the label, "Apple Inc.", not the typed name)
+    hit = lambda q, lbl, d: {"id": q, "label": lbl, "description": d,  # noqa: E731
+                             "match": {"type": "label", "text": lbl}}
     monkeypatch.setattr(wd, "_get", lambda url, e, **p: {"search": [
-        {"id": "QF", "description": "fruit of the apple tree", "match": {"text": "apple"}},
-        {"id": "QA", "description": "American technology company", "match": {"text": "Apple"}}]})
+        hit("QF", "apple", "fruit of the apple tree"), hit("QN", "Apple", "unisex given name"),
+        hit("QA", "Apple Inc.", "American technology company")]})
+    ents = {"QF": _ent("QF", "apple", "Apple", desc="fruit of the apple tree"),
+            "QN": _ent("QN", "Apple", desc="unisex given name"),
+            "QA": _ent("QA", "Apple Inc.", "Apple Inc.", desc="American technology company")}
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {i: ents[i] for i in ids})
     assert wd.search("Apple", [], business=True, exact=True) == "QA"
     assert wd.search("Apple", [], prefer_company=False, exact=True) == "QF"
     # one site in each of two categories is two sites: low + low -> medium overall
@@ -642,12 +649,45 @@ def test_title_case_junk_trimmed_and_exact_wikidata(monkeypatch):
     assert f("Is Zoom vs Teams Worth It") == ["Zoom", "Teams"]
     assert f("Best Netflix vs Disney+ Comparison") == ["Netflix", "Disney+"]
     monkeypatch.setattr(wd, "_get", lambda *a, **k: {"search": [
-        {"id": "QF", "match": {"text": "Teams Worth It (film)"}},
-        {"id": "QT", "match": {"text": "Teams"}}]})
-    assert wd.search("Teams", [], prefer_company=False, exact=True) == "QT"
+        {"id": "QF", "label": "Teams Worth It", "match": {"text": "Teams Worth It"}},
+        {"id": "QT", "label": "Teams", "match": {"text": "Teams"}}]})
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {
+        "QF": _ent("QF", "Teams Worth It", "Teams Worth It", desc="2019 film"),
+        "QT": _ent("QT", "Teams", "Teams")})
+    assert wd.search("Teams", [], business=True, exact=True) == "QT"
     assert wd.search("Worth", [], exact=True) is None
     monkeypatch.setattr(wd, "search", lambda n, e, **k: {"ChatGPT": "QC"}.get(n))
     assert cp._lookup("ChatGPT Showdown", []) == "QC"  # outer word dropped
+
+
+def test_wikidata_error_body_is_reported_and_not_cached(monkeypatch):
+    calls = []
+
+    class R:  # the action API answers errors with HTTP 200
+        status_code = 200
+
+        def raise_for_status(self): pass
+
+        def json(self):
+            return {"error": {"code": "maxlag", "info": "Waiting for a database server"}}
+    monkeypatch.setattr(wd.httpx, "get", lambda *a, **k: calls.append(1) or R())
+    errors: list[str] = []
+    assert wd._get(wd.API, errors, action="x") == {} and "maxlag" in errors[0]
+    wd._get(wd.API, errors, action="x")
+    assert len(calls) == 2  # asked again: the error was not stored
+
+
+def test_list_title_with_two_keywords_keeps_first_name():
+    assert cp.names_from_list("Competitors and Alternatives - Accenture, Infosys, Wipro") == [
+        "Accenture", "Infosys", "Wipro"]
+
+
+def test_verify_looks_names_up_in_parallel(monkeypatch):
+    import threading
+    both = threading.Barrier(2, timeout=5)  # one-at-a-time lookups never meet here
+    monkeypatch.setattr(cp, "_lookup", lambda n, e: both.wait() and None)
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {})
+    assert cp._verify(["A", "B"], set(), [], []) == ({}, set())
 
 
 def test_off_class_demoted_and_same_owner_merged():
@@ -756,3 +796,217 @@ def test_only_the_server_on_our_port_is_killed(monkeypatch):
     server._kill_orphans()
     assert [c for c in ran if c[0] == "taskkill"] == [
         ["taskkill", "/F", "/PID", "111", "/FI", "IMAGENAME eq llama-server.exe"]]
+
+
+# ---- collect / report review fixes ----
+
+def _news_client(monkeypatch, reply):
+    """Fake Google News: reply(after, before) -> [(title, publisher)]. -> (clients made, windows)."""
+    from datetime import timedelta
+    from urllib.parse import parse_qs, urlparse
+    from backend.collectors import news
+    made, asked = [], []
+
+    class Client:
+        def __init__(self, *a, **k):
+            made.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url):
+            q = parse_qs(urlparse(url).query)["q"][0].split()
+            after, before = (date.fromisoformat(w.split(":")[1]) for w in q[-2:])
+            asked.append((after, before))
+            day = (after + timedelta(days=1)).strftime("%a, %d %b %Y 12:00:00 GMT")
+            items = "".join(f"<item><title>{t} - {p}</title><link>https://n/{t}</link>"
+                            f"<pubDate>{day}</pubDate><source>{p}</source></item>"
+                            for t, p in reply(after, before))
+            return type("R", (), {"status_code": 200,
+                                  "text": f"<rss><channel>{items}</channel></rss>"})()
+    monkeypatch.setattr(news.httpx, "Client", Client)
+    return made, asked
+
+
+def _offline(*a, **k):
+    raise OSError("offline")
+
+
+def test_full_news_month_is_split_and_deduped(monkeypatch):
+    def reply(after, before):  # a month fills the 100-item cap, half a month does not
+        n = 100 if (before - after).days > 20 else 3
+        return [(f"Acme story {after} {i}", "Reuters") for i in range(n)] + [("Acme again", "AP")]
+    _, asked = _news_client(monkeypatch, reply)
+    monkeypatch.setattr(co, "_http", _offline)  # Hacker News
+    bounds = co.quarter_bounds(date(2026, 5, 10))  # Oct..Apr full months + 10 days of May
+    e = co.entity({"label": "Acme", "links": {}}, bounds)
+    assert len(asked) == 7 * 3 + 1  # each full month: itself + two halves
+    titles = [i["title"] for i in e["items"]]
+    assert len(titles) == len(set(titles)) and titles.count("Acme again - AP") == 1
+    assert len(titles) > 7 * 100  # the halves added to the capped month
+
+    _, asked = _news_client(monkeypatch, lambda a, b: [(f"Acme {a} {i}", "AP") for i in range(100)])
+    errors: list[str] = []
+    co.google_news("Acme", bounds, errors)  # always full: stops at the floor and says so
+    assert min((b - a).days for a, b in asked) > co.NEWS_MIN_DAYS
+    assert errors == ["google_news: some periods still hit the 100-item cap, "
+                      "counts there are a sample"]
+
+
+def test_news_requests_share_one_client(monkeypatch):
+    made, asked = _news_client(monkeypatch, lambda a, b: [("Acme wins", "AP")])
+    co.google_news("Acme", co.quarter_bounds(date(2026, 5, 10)), [])
+    assert len(asked) == 8 and len(made) == 1
+
+
+def test_publisher_suffix_does_not_name_the_entity(monkeypatch):
+    _news_client(monkeypatch, lambda a, b: [("Markets slide", "Yahoo Finance"),
+                                            ("Yahoo cuts staff", "Reuters")])
+    items = co.google_news("Yahoo", co.quarter_bounds(date(2026, 5, 10)), [])
+    assert {i["title"] for i in items} == {"Yahoo cuts staff - Reuters"}
+
+
+def test_blog_feed_found_from_the_homepage_link(monkeypatch):
+    pages = {"https://acme.com": '<html><head><link rel="alternate" type="application/rss+xml" '
+                                 'href="/press/all.xml"></head></html>',
+             "https://acme.com/press/all.xml": "<rss><channel><item><title>Post</title>"
+                                               "<link>https://acme.com/p</link><pubDate>Fri, 01 May "
+                                               "2026 00:00:00 GMT</pubDate></item></channel></rss>"}
+    seen: list[str] = []
+
+    def http(url, **p):
+        seen.append(url)
+        return type("R", (), {"status_code": 200 if url in pages else 404,
+                              "text": pages.get(url, ""), "url": url})()
+    monkeypatch.setattr(co, "_http", http)
+    items, used = co.blogs({"website": "https://acme.com"}, co.quarter_bounds(date(2026, 5, 10)), [])
+    assert used == "https://acme.com/press/all.xml" and [i["title"] for i in items] == ["Post"]
+    assert seen == ["https://acme.com", used]  # no path probing
+
+
+def test_ai_keywords_cover_labs_products_and_variants():
+    from backend.company.report import ai_terms
+    for title in ("Acme to invest in OpenAI", "Acme puts $4 billion in Anthropic",
+                  "Acme buys machine-learning startup", "Acme opens its ML platform",
+                  "Acme bets on robotaxi and self-driving", "Apple Intelligence comes to Acme",
+                  "Acme adopts watsonx", "Acme rolls out Agentforce", "Acme chases superintelligence"):
+        assert ai_terms(title, "Acme"), title
+    assert ai_terms("Apple Intelligence delayed again", "Apple", "Apple Inc.") == ["apple intelligence"]
+    assert ai_terms("Acme launches gaming GPUs", "Acme") == []  # a GPU alone is not AI
+    assert ai_terms("Acme rents GPUs for AI training", "Acme") == ["gpus", "ai"]
+
+
+def _many_sources(monkeypatch):
+    """A report with 45 numbered sources: 5 companies, 9 AI headlines each."""
+    from backend.company import linkcheck
+    monkeypatch.setattr(linkcheck, "check_all", lambda urls: {
+        u: {"status": "live", "code": 200, "checked_at": "t"} for u in urls})
+    q = [{"label": "Q2 2026", "start": "2026-04-01", "end": "2026-07-01"},
+         {"label": "Q3 2026", "start": "2026-07-01", "end": "2026-10-01"},
+         {"label": "Q4 2026 (to date)", "start": "2026-10-01", "end": "2026-11-12"}]
+    names = ["Acme", "Rival A", "Rival B", "Rival C", "Rival D"]
+    ent = lambda n: {"label": n, "searched_as": n, "links": {}, "errors": [], "items": [  # noqa: E731
+        {"source": "google_news", "title": f"{n} ships AI agents {'abcdefghi'[i]}", "url": f"u/{n}/{i}",
+         "published": f"2026-08-{5 + 3 * i:02d}" if i < 6 else f"2026-11-{i:02d}",
+         "quarter": q[1 if i < 6 else 2]["label"]} for i in range(9)]}
+    return {"company": {"label": "Acme", "wikidata_url": None, "categories": [],
+                        "links": {"website": "https://acme.example"}},
+            "competitors": {"mode": "user", "overall": [{"label": n, "evidence": []}
+                                                        for n in names[1:]]},
+            "collected": {"quarters": q, "company": ent("Acme"),
+                          "competitors": [ent(n) for n in names[1:]]}}
+
+
+def test_invented_numbers_fail_with_many_sources(tmp_path, monkeypatch):
+    """[n] indexes and headline dates are not facts: with 45 sources, 5, 35 and 17
+    are all a citation number or a day of the month."""
+    from backend.company import report
+    from backend.llm import client
+    claim = lambda t: {"text": t, "confidence": "medium", "sources": [7]}  # noqa: E731
+    reply = {"summary": [claim("Rival A raised $5B."), claim("Rival A grew revenue 35%."),
+                         claim("Rival A signed 17 deals."), claim("Rival A ships AI agents.")],
+             "compare": [], "companies": {}}
+    import json
+    monkeypatch.setattr(client, "complete", lambda *a, **k: json.dumps(reply))
+    report.build(_many_sources(monkeypatch), tmp_path, use_model=True)
+    md = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "Rival A ships AI agents. {{medium}} [7]" in md
+    assert "$5B" not in md and "grew revenue" not in md and "17 deals" not in md
+
+
+def test_guessed_website_is_reported(tmp_path, monkeypatch):
+    from backend.company import report
+    raw = _many_sources(monkeypatch)
+    report.build(raw, tmp_path)
+    assert "guess" not in (tmp_path / "report.md").read_text(encoding="utf-8")
+    raw["company"]["website_guessed"] = True
+    report.build(raw, tmp_path)
+    md = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "website (https://acme.example) is not on Wikidata: it is a guess" in md
+
+
+def test_raw_json_survives_a_failed_report(monkeypatch, tmp_path):
+    from backend.company import collect, competitors, pipeline, report
+    monkeypatch.setattr(pipeline, "OUT", tmp_path)
+    monkeypatch.setattr(wd, "resolve", lambda *a, **k: {
+        "label": "Acme", "qid": None, "on_wikidata": False, "categories": [],
+        "links": {"website": "https://acme.example"}, "errors": []})
+    monkeypatch.setattr(competitors, "discover", lambda *a: {"overall": []})
+    monkeypatch.setattr(collect, "collect", lambda c, o, social: {
+        "company": {"label": "Acme", "items": [{"title": "kept"}], "errors": []},
+        "competitors": [], "quarters": []})
+
+    def boom(*a, **k):
+        raise ValueError("paraparser: crossed tags")
+    monkeypatch.setattr(report, "build", boom)
+    with pytest.raises(ValueError):
+        pipeline.run("Acme", vision=False)
+    saved = next(tmp_path.glob("acme/*/raw.json")).read_text(encoding="utf-8")
+    assert '"title": "kept"' in saved
+
+
+def test_pdf_survives_crossed_markup(tmp_path):
+    from backend.pdf import _inline, render_markdown_pdf
+    bad = "x `code *star` y* and a <b> & more"
+    assert _inline(bad) == "x `code *star` y* and a &lt;b&gt; &amp; more"  # escaped plain text
+    assert render_markdown_pdf(f"# T\n> {bad}\n- {bad}\n\n{bad}", tmp_path / "x.pdf", "T").exists()
+
+
+# ---- rival lookup leftovers ----
+
+def test_named_rivals_resolve_to_the_business(monkeypatch):
+    """--competitors: "Gemini" is the chatbot, not the constellation listed first; a
+    typed name with no business match still resolves (the user named it on purpose)."""
+    hits = {"Gemini": [{"id": "QS", "label": "Gemini", "description": "constellation",
+                        "match": {"text": "Gemini"}},
+                       {"id": "QB", "label": "Gemini", "description": "chatbot by Google",
+                        "match": {"text": "Gemini"}}],
+            "Zed": [{"id": "QZ", "label": "Zed editor", "description": "text editor",
+                     "match": {"text": "Zed editor"}}]}
+    ents = {"QS": _ent("QS", "Gemini", "Gemini (constellation)", desc="constellation"),
+            "QB": _ent("QB", "Gemini", "Gemini (chatbot)", desc="chatbot by Google",
+                       P178=[_claim("QG")]),
+            "QZ": _ent("QZ", "Zed editor", "Zed", desc="text editor")}
+    monkeypatch.setattr(wd, "_get", lambda url, e, **p: {"search": hits[p["search"]]})
+    monkeypatch.setattr(wd, "get_entities", lambda ids, e: {i: ents[i] for i in ids if i in ents})
+    got = cp.from_names(["Gemini", "Zed"], [])
+    assert [(m["qid"], m["name"]) for m in got] == [("QB", "Gemini"), ("QZ", "Zed")]
+
+
+def test_works_with_a_maker_are_not_businesses():
+    album = _ent("Q1", "Their Satanic Majesties Request", desc="1967 studio album by the Rolling Stones")
+    game = _ent("Q2", "Code", desc="2008 video game", P178=[_claim("QD")])
+    ride = _ent("Q3", "Jolly Rancher Remix", desc="roller coaster at Hersheypark", P176=[_claim("QM")])
+    college = _ent("Q4", "Williams College", desc="liberal arts college in Massachusetts",
+                   P452=[_claim("QE")])
+    assert not any(wd.is_business(x) for x in (album, game, ride, college))
+    assert wd.is_business(_ent("Q5", "Pixar", desc="American animation studio"))
+    assert wd.is_business(_ent("Q6", "Ubisoft", desc="French video game company"))
+    assert wd.is_business(_ent("Q7", "Oura Ring", desc="smart health ring", P176=[_claim("QO")]))
+
+
+def test_year_with_colon_is_not_a_rival_name():
+    assert cp.names_from_list("Competitors & Alternatives 2026: Accenture, IBM") == ["Accenture", "IBM"]

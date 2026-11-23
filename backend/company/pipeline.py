@@ -1,4 +1,6 @@
-"""The whole company pipeline; shared by the CLI and the localhost page."""
+"""The whole company pipeline, shared by the CLI and the localhost page: resolve
+(Wikidata) -> competitors (web search) -> collect -> vision notes -> report.
+raw.json is written before the report stage, so a failed report keeps the data."""
 
 import json
 import re
@@ -42,7 +44,7 @@ def run(name: str, url: str | None = None, categories: int = 5, per_category: in
                                "web search per category (~15 s each)"))
     comps = competitors.discover(company, per_category, top, names or None)
     t2 = time.perf_counter()
-    say(f"3/5 collect      news, blogs, YouTube for {1 + len(comps['overall'])} companies")
+    say(f"3/5 collect      news, blogs, YouTube, releases, filings for {1 + len(comps['overall'])} companies")
     data = collect.collect(company, comps["overall"], social=social)
     if not data["company"]["items"]:
         say(f"               nothing found for {name!r}: check the spelling"
@@ -60,13 +62,17 @@ def run(name: str, url: str | None = None, categories: int = 5, per_category: in
     raw = {"company": company, "competitors": comps, "collected": data,
            "timing_s": {"resolve": round(t1 - t0, 1), "competitors": round(t2 - t1, 1),
                         "collect": round(t3 - t2, 1), "vision": round(t4 - t3, 1)}}
+
+    def save() -> None:
+        (out_dir / "raw.json").write_text(json.dumps(raw, indent=2, ensure_ascii=False),
+                                          encoding="utf-8")
+    save()  # before the report: a failed link check, model or PDF must not lose the paid searches
     say("5/5 report       link checks" + (", local-model analysis" if analysis else "")
         + ", PDF")
     rep = report.build(raw, out_dir, use_model=analysis, bw=bw)
     raw["link_checks"] = rep["checks"]
     raw["timing_s"]["report"] = round(time.perf_counter() - t4, 1)
-    (out_dir / "raw.json").write_text(json.dumps(raw, indent=2, ensure_ascii=False),
-                                      encoding="utf-8")
+    save()
     return {**raw, "out_dir": out_dir, "pdf": rep["pdf"], "link_stats": rep["link_stats"]}
 
 

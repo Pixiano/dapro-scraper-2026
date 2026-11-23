@@ -10,6 +10,8 @@ from backend.youtube.client import YouTubeError
 @pytest.fixture(autouse=True)
 def no_images(monkeypatch):
     monkeypatch.setattr(yc, "_save_image", lambda *a, **k: False)
+    # keyed by default: without a key collect() takes the RSS route (real network)
+    monkeypatch.setattr(settings, "youtube_api_key", "k")
 
 
 CHANNEL = {"items": [{
@@ -99,11 +101,75 @@ def test_comments_disabled_is_tolerated(monkeypatch, tmp_path):
     assert not any("commentsDisabled" in e for e in art.errors)
 
 
-def test_no_api_key_contained(monkeypatch, tmp_path):
+RSS = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+      xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+ <title>Acme Films</title>
+ <entry>
+  <yt:videoId>vid00000001</yt:videoId>
+  <title>Episode 1</title>
+  <published>2026-11-13T14:00:08+00:00</published>
+  <media:group>
+   <media:title>Episode 1</media:title>
+   <media:thumbnail url="https://i3.ytimg.com/vi/vid00000001/hqdefault.jpg"/>
+   <media:description>Description of episode 1.</media:description>
+   <media:community><media:statistics views="842097"/></media:community>
+  </media:group>
+ </entry>
+</feed>"""
+
+
+def _rss_client(pages, seen):
+    class Resp:
+        def __init__(self, text, status_code=200):
+            self.text, self.status_code = text, status_code
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, **k):
+            seen.append(url)
+            return next((Resp(t) for key, t in pages.items() if key in url), Resp("", 404))
+
+    return Client
+
+
+def test_no_api_key_falls_back_to_channel_rss(monkeypatch, tmp_path):
+    cid = "UC" + "x" * 22
+    seen = []
     monkeypatch.setattr(settings, "youtube_api_key", "")
+    monkeypatch.setattr(yc, "_get", lambda *a, **k: pytest.fail("Data API called without a key"))
+    monkeypatch.setattr(yc, "fetch_transcript", lambda vid: ("hello transcript", None))
+    monkeypatch.setattr(yc.httpx, "Client", _rss_client({
+        "/@acmefilms": '<link rel="alternate" type="application/rss+xml" '
+                       f'href="https://www.youtube.com/feeds/videos.xml?channel_id={cid}">',
+        f"feeds/videos.xml?channel_id={cid}": RSS}, seen))
+    art = yc.collect("https://www.youtube.com/@acmefilms", tmp_path)
+
+    assert art.ok and not art.errors
+    assert seen == ["https://www.youtube.com/@acmefilms",
+                    f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}"]
+    assert art.method == "rss+timedtext" and "reduced" in art.facts["view"]
+    assert art.facts["channel_title"] == "Acme Films" and art.facts["channel_id"] == cid
+    blocks = {b["label"]: b["text"] for b in art.text_blocks}
+    assert blocks["recent videos (RSS, latest 1)"] == "- Episode 1 (2026-11-13, 842097 views)"
+    assert blocks["video: Episode 1"] == "Description of episode 1."
+    assert blocks["transcript: Episode 1"] == "hello transcript"
+
+
+def test_no_api_key_unresolvable_channel_contained(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "youtube_api_key", "")
+    monkeypatch.setattr(yc.httpx, "Client", _rss_client({}, []))
     art = yc.collect("@whoever", tmp_path)
     assert art.ok is False
-    assert any("noApiKey" in e for e in art.errors)
+    assert any("channelNotFound" in e for e in art.errors)
 
 
 def test_bad_input_contained(tmp_path, monkeypatch):

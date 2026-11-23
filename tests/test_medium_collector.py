@@ -2,17 +2,18 @@
 
 import pytest
 
-from backend.collectors import medium as md
+from backend.collectors import feed as md
 from backend.collectors.base import MEDIUM, classify_url
 
 
-def _item(n: int) -> str:
+def _item(n: int, body: str = "") -> str:
+    body = body or f'Body of post {n} with a <a href="https://x.test">link</a>.'
     return f"""
   <item>
     <title>Post Number {n}</title>
     <link>https://medium.com/@user/post-{n}</link>
     <pubDate>Mon, 0{n} Feb 2026 10:00:00 GMT</pubDate>
-    <content:encoded><![CDATA[<p>Body of post {n} with a <a href="https://x.test">link</a>.</p>]]></content:encoded>
+    <content:encoded><![CDATA[<p>{body}</p>]]></content:encoded>
   </item>"""
 
 
@@ -160,3 +161,18 @@ def test_transport_error_contained(monkeypatch, tmp_path):
 
     assert art.ok is False
     assert any("RuntimeError" in e for e in art.errors)
+
+
+def test_full_text_kept_per_post_with_total_cap(monkeypatch, tmp_path):
+    # 3 posts of 5,000 chars: each is cut to feed_post_chars, and the source as a
+    # whole to feed_total_chars (4,000 + 2,000, the third post dropped).
+    feed = _feed(0).replace("</description>", "</description>" + "".join(
+        _item(n, "w" * 5000) for n in (1, 2, 3)))
+    monkeypatch.setattr(md.settings, "feed_post_chars", 4000)
+    monkeypatch.setattr(md.settings, "feed_total_chars", 6000)
+    monkeypatch.setattr(md.httpx, "Client", _make_client(_Resp(text=feed), []))
+    art = md.collect("https://medium.com/@user", tmp_path)
+
+    bodies = [b["text"] for b in art.text_blocks if b["label"].startswith("post: ")]
+    assert [len(b) for b in bodies] == [4000, 2000]
+    assert art.facts["post_count"] == 3

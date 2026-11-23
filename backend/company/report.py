@@ -1,5 +1,7 @@
-"""Phase 4: AI filter, live link check, rule-based outlook, Markdown -> PDF.
-No LLM: every number is a count, every inference a stated rule."""
+"""Phase 4: AI filter (keyword list), live link check, rule-based outlook, optional
+local-model analysis (analysis.py, checked by code), Markdown -> PDF.
+Every number is a count and every outlook a stated rule; the model's paragraphs
+are marked "analysis" and never feed a count, a confidence or an outlook."""
 
 import re
 from collections import Counter
@@ -11,16 +13,26 @@ from ..pdf import TAGS, render_markdown_pdf
 from . import linkcheck, visual
 from . import wikidata as wd
 from .analysis import prose
+from .collect import headline
 
 # Word-boundary AI vocabulary. "AI" is case-sensitive ("ai" in other words is
 # not AI); the entity's own name is removed first so "Mistral AI" / "OpenAI"
 # headlines are not AI just by naming the company.
-# ponytail: keyword list, not a classifier; extend the list when misses show up
+# AI labs and products count too ("invests in Anthropic", "watsonx", "Apple Intelligence").
+# ponytail: keyword list, not a classifier; extend the list when misses show up.
+# Measured on 200 stored headlines judged by hand (118 AI): precision 0.99, recall 0.87
+# (the list before it: 1.00 and 0.85). Most misses are AI products that are the entity.
 AI = re.compile(
-    r"(?<![\w])(?:(?i:AI agents?|artificial intelligence|machine learning|deep learning|"
-    r"neural (?:networks?|engine)|large language models?|language models?|"
-    r"foundation models?|reasoning models?|generative|chatbots?|agentic|copilot|chatgpt|"
-    r"gpt-?\d[\w.]*|gemini|claude|llama|grok|inference)|AI|A\.I\.|AGI|GenAI|LLMs?|GPUs?)"
+    r"(?<![\w])(?:(?i:AI agents?|artificial intelligence|machine[- ]learning|deep[- ]learning|"
+    r"neural (?:networks?|engine)|large language models?|language models?|llms?|"
+    r"foundation models?|frontier models?|reasoning models?|generative|chatbots?|agentic|"
+    r"(?:coding|voice|autonomous|managed) agents?|multi-agent|super[- ]?intelligence|"
+    r"robotaxis?|self-driving|driverless|autonomous (?:vehicles?|cars?|driving)|"
+    r"humanoid robots?|deepfakes?|prompt (?:engineering|injection)|system prompts?|"
+    r"copilot|chatgpt|gpt(?:-?\d[\w.]*)?|gemini|claude|llama|grok|inference|"
+    r"openai|anthropic|deepmind|hugging ?face|deepseek|qwen|midjourney|stable diffusion|"
+    r"apple intelligence|watsonx|agentforce|codex|bedrock|sagemaker|firefly|notebooklm|"
+    r"pytorch|tensorflow)|AI|A\.I\.|AGI|GenAI|ML|MLOps|xAI|MCP|TPUs?|GPUs?)"
     r"(?![\w])")  # hyphens allowed: "AI-powered", "Gen-AI"
 SRC = {"hacker_news": "Hacker News", "google_news": "Google News", "blog": "Official blog",
        "medium": "Medium", "youtube": "YouTube"}
@@ -28,16 +40,24 @@ FIRST_PARTY = {"blog", "medium", "youtube"}
 # Feeds that only return the latest N posts reach back into this quarter but
 # not the last one: counting them would bias the outlook toward "up".
 CAPPED = {"blog", "medium"}
+# Releases and filings: dated and first-party, but not headlines. Counted apart, never in
+# the AI items, the AI share or the outlook. Hugging Face models are AI by nature, a
+# GitHub repo is AI by the keyword rule, an SEC filing never. source -> (counted as, cited as)
+ACT = {"huggingface": ("Hugging Face models", "Hugging Face"),
+       "github": ("new public GitHub repos", "GitHub"),
+       "sec": ("SEC current reports (8-K/6-K)", "SEC EDGAR")}
 BASE = {"ai", "a.i."}  # in every AI headline: says nothing about focus
 TOP = 6  # items listed per quarter per entity
 
 
 # Also the Gemini exchange, people named Claude, the animal, GitHub's non-AI news...
 AMBIG = {"gemini", "claude", "llama", "grok", "copilot", "inference"}
+GPU = {"gpu", "gpus"}  # gaming GPUs: counts only next to any other term ("Llama on GPUs")
 _A = r"(?:gemini|claude|llama|grok|copilot)"
 AMBIG_CTX = re.compile(
     rf"(?i:(?:google|anthropic|meta|xai|microsoft|github)(?:['’]s)?\W+{_A}(?![\w])"
-    rf"|(?<![\w]){_A}\W+(?:\d|(?:pro|flash|ultra|nano|opus|sonnet|haiku|code|advanced)(?![\w])))")
+    rf"|(?<![\w]){_A}\W+(?:\d|(?:pro|flash|ultra|nano|opus|sonnet|haiku|code|advanced|models?|api|cli|enterprise)"
+    rf"(?![\w])))")
 # two model names, or a model maker, in one headline: "via Claude, Gemini Prompts"
 MODEL_TALK = re.compile(rf"(?i)(?<![\w])(?:google|anthropic|openai|xai|chatgpt|gpt-?\d[\w.]*)(?![\w])"
                         rf"|(?<![\w]){_A}(?![\w]).*(?<![\w]){_A}(?![\w])")
@@ -46,7 +66,8 @@ MODEL_TALK = re.compile(rf"(?i)(?<![\w])(?:google|anthropic|openai|xai|chatgpt|g
 def ai_terms(title: str, *names: str | None) -> list[str]:
     """Names (search name, label) are removed first, with a trailing "AI":
     a competitor found as "Mistral" still strips "Mistral AI". Ambiguous terms
-    count only with a non-ambiguous AI term or in model context (AMBIG_CTX).
+    count only with a non-ambiguous AI term or in model context (AMBIG_CTX);
+    a GPU mention only with another term.
     ponytail: context list; a bare "Gemini tops charts" is missed"""
     ctx = AMBIG_CTX.search(title)  # before stripping: "Google Gemini" for Google itself
     # A company that shares its name with an AI model (Gemini the crypto exchange):
@@ -54,9 +75,12 @@ def ai_terms(title: str, *names: str | None) -> list[str]:
     if any(n and n.lower() in AMBIG for n in names) and (ctx or MODEL_TALK.search(title)):
         return []
     for n in filter(None, names):
-        title = re.sub(rf"(?<![\w]){re.escape(n)}(?:\s+AI)?(?![\w])", " ", title, flags=re.I)
+        # not "Apple Intelligence": there the name is part of an AI product's name
+        title = re.sub(rf"(?<![\w]){re.escape(n)}(?!\s+Intelligence)(?:\s+AI)?(?![\w])", " ",
+                       title, flags=re.I)
     terms = [m.lower() for m in AI.findall(title)]
-    return terms if ctx or set(terms) - AMBIG else []
+    kinds = set(terms)
+    return terms if ctx or kinds - AMBIG - GPU or (kinds & GPU and kinds & AMBIG) else []
 
 
 def capped(i: dict) -> bool:
@@ -93,13 +117,30 @@ def _share(o: dict) -> str:
     return f"{o['share_cur']}% of headlines, was {o['share_last']}%"
 
 
+def releases(e: dict, last: str, cur: str) -> dict[str, list[dict]]:
+    """source -> its items in the two quarters shown, the ones worth naming first:
+    most liked / starred, newest filings. Only sources the company has an id for."""
+    out = {}
+    for s in ACT:
+        if (e.get("links") or {}).get(s):
+            its = [i for i in e["items"] if i["source"] == s and i["quarter"] in (last, cur)]
+            out[s] = sorted(its, reverse=True, key=lambda i: (
+                i.get("likes", i.get("stars", 0)), i["published"] or ""))
+    return out
+
+
+def repo_ai(i: dict, e: dict) -> bool:
+    """'microsoft/copilot-chat-kit' + description, through the headline keyword rule."""
+    text = re.sub(r"[-_]", " ", i["title"].split("/")[-1]) + " " + (i.get("description") or "")
+    return bool(ai_terms(text, e.get("searched_as"), e.get("label")))
+
+
 def analyse(e: dict, labels: list[str], cur_start: date, today: date) -> dict:
     ai = []
     site = urlparse((e.get("links") or {}).get("website") or "").netloc.removeprefix("www.")
+    e = {**e, "items": [i for i in e["items"] if i["source"] not in ACT]}  # headlines only
     for it in e["items"]:
-        # the publisher is not the headline: "... - AI Business" is not AI news
-        head = it["title"].removesuffix(" - " + (it.get("publisher") or ""))
-        terms = ai_terms(head, e.get("searched_as"), e.get("label"))
+        terms = ai_terms(headline(it), e.get("searched_as"), e.get("label"))
         if terms:
             # a Hacker News post is often about the company, not by it: medium only
             # when it links to the company's own site
@@ -204,9 +245,11 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
     metas = [raw["company"], *raw["competitors"]["overall"]]  # same order as collected
     an = [analyse(e, labels, cur_start, today) for e in ents]
     picks = [{lb: top(a["ai"], lb, 2 * TOP) for lb in labels[1:]} for a in an]
+    rels = [releases(e, labels[1], labels[2]) for e in ents]
 
     urls: list[str] = []
-    for e, m, p in zip(ents, metas, picks):
+    for e, m, p, r in zip(ents, metas, picks, rels):
+        urls += [i["url"] for its in r.values() for i in its[:3]]
         urls += [v for v in (e.get("links") or {}).values() if v]
         urls += [x["url"] for x in (m.get("evidence") or [])[:3]]
         urls += [i[k] for its in p.values() for i in its for k in ("url", "link") if i.get(k)]
@@ -239,6 +282,23 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
         return (f"~ {_d(i['published'])}|{KIND.get(i['source'], 'first')}|{_t(i['title'])} · "
                 f"*{SRC[i['source']]}{pts}* {_b(i['confidence'])} {refs}")
 
+    def n_q(its: list[dict]) -> str:
+        return f"{sum(i['quarter'] == last for i in its)}/{sum(i['quarter'] == cur for i in its)}"
+
+    def released(e: dict, r: dict[str, list[dict]]) -> str:
+        """'Hugging Face models 22/5: microsoft/Mage-VL [7], ... · ...' (last/cur quarter)."""
+        parts = []
+        for s, its in r.items():
+            what, kind = ACT[s]
+            txt = f"{what} {n_q(its)}"
+            if s == "github":
+                txt += f" ({n_q([i for i in its if repo_ai(i, e)])} AI by keyword)"
+            shown = [i for i in its[:3] if i["url"] in alive][:2 if s != "sec" else 3]
+            refs = dict.fromkeys(f"{_t(i['title'])} {cite(i['url'], _t(i['title']), kind)}"
+                                 for i in shown)  # two 6-Ks on one day share a title
+            parts.append(txt + (": " + ", ".join(refs) if refs else ""))
+        return " · ".join(parts)
+
     rows = list(zip(ents, metas, an, picks))
     own = {company.get("label"), company.get("search_name"),
            wd.base_name(company.get("label") or "")}
@@ -267,6 +327,8 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
                            if m.get("also") else ""))
         head.append("- **AI items / all items collected**: " + " · ".join(
             f"{lb} {a['counts'][lb]}/{a['total'][lb]}" for lb in labels))
+        if rels[n]:
+            head.append(f"- **Releases and filings** ({last} / {cur}): {released(e, rels[n])}")
         did_last = [i for i in p[last] if i["url"] in alive][:TOP]
         so_far = [i for i in p[cur] if i["url"] in alive][:3]
         listed += len(did_last + so_far)
@@ -314,7 +376,7 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
     if not listed:
         md.append(f">! No AI headlines were found for {_t(company['label'])}"
                   + (" or its competitors" if len(ents) > 1 else "") + f" in {last} or {cur} ("
-                  f"{sum(len(e['items']) for e in ents)} headlines collected in all), so there "
+                  f"{sum(sum(a['total'].values()) for a in an)} headlines collected in all), so there "
                   "is no analysis. Check the spelling, pin the company with `--url https://...`, "
                   "or name its rivals with `--competitors`.")
     if good and ana["summary"]:
@@ -366,6 +428,12 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
                   f"{a['counts'][last]} | {a['counts'][cur]} | "
                   f"{_b(o['trend'])} {o['share_cur']}%, was {o['share_last']}% "
                   f"({_b(o['confidence'])}) |")
+    if any(rels):  # counted apart from headlines: see "Releases and filings" in How to read this
+        md += [f"### Releases and filings ({last} / {cur})",
+               "| Company | " + " | ".join(what for what, _ in ACT.values()) + " |",
+               "|---|" + "---|" * len(ACT)]
+        md += [f"| {_t(e['label'])} | " + " | ".join(n_q(r[s]) if s in r else "-" for s in ACT)
+               + " |" for e, r in zip(ents, rels)]
     if good and ana["compare"]:
         md += [f"### {_t(company['label'])} vs its competitors (analysis)",
                "> " + prose(ana["compare"])]
@@ -382,6 +450,10 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
                             for x in m.get("evidence") or []):
         cav.append("Competitors were found with DuckDuckGo alone, which returns few results; "
                    "adding a Brave Search key usually finds more.")
+    if company.get("website_guessed"):
+        cav.append(f"The company's website ({_t(company['links']['website'])}) is not on "
+                   "Wikidata: it is a guess from a web search, and the blog feed and vision "
+                   "notes come from it. Pin the right one with `--url https://...`.")
     cav.append("The trend compares AI's share of each company's headlines in the quarter so far "
                f"with {last}. It counts headlines, not deals or revenue, so a quarter with a lot "
                "of other news (a big contract, a lawsuit) lowers the AI share without any less "
@@ -421,8 +493,10 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
     md += ["---", "# Sources and method", "## How to read this",
           "- **AI item**: a headline/post whose title matches the AI keyword list (word "
           "boundary; the entity's own name is removed first, so 'Mistral AI' alone is not AI). "
+          "The names of AI labs and products count (OpenAI, Anthropic, watsonx). "
           "Ambiguous terms (Gemini, Claude, Llama, Grok, Copilot, inference) count only "
-          "next to another AI term or in model context ('Google Gemini', 'Claude 4').",
+          "next to another AI term or in model context ('Google Gemini', 'Claude 4'); "
+          "a GPU mention only next to another term.",
           "- **Item confidence**: high = first-party (own blog, Medium, YouTube); "
           "medium = a news headline naming the company, or a Hacker News post linking to "
           "the company's own site; low = other Hacker News posts, which are often about "
@@ -448,6 +522,16 @@ def build(raw: dict, out_dir: Path, use_model: bool = False, bw: bool = False) -
           "gpt-oss-20b from this report's own headlines and counts. Code drops any "
           "sentence without a valid [n] citation, without a confidence, or with a number "
           "not in its facts. Never used in any count, confidence or rule-based outlook.",
+          "- **Releases and filings**: Hugging Face model uploads, new public GitHub repos "
+          "(forks left out) and SEC current reports (8-K; 6-K for foreign issuers), counted "
+          "per quarter as last/this. Dated and first-party, but not headlines, so they are "
+          "never part of the AI items, the AI share or the outlook. Every Hugging Face model "
+          "is AI work; a repo is AI only if its name or description matches the AI keyword "
+          "list; a filing is never AI news (its 8-K item codes name what was reported). The "
+          "Hugging Face organisation is the one on Wikidata, or a Hub organisation named "
+          "like the company's GitHub account or its name that Hugging Face has verified "
+          "and whose display name names the company. GitHub and SEC ids come from Wikidata "
+          "only. '-' means no id was found.",
           f"- **Likely focus**: AI terms in {last} and {cur} headlines; terms in both "
           "quarters are 'continuing', terms only in the current one are 'newer'. A rule "
           "over headline words, not a forecast.",

@@ -72,6 +72,18 @@ def init_db() -> None:
         conn.close()
 
 
+def fail_unfinished() -> None:
+    """Startup: jobs a restart cut off would otherwise show as running forever."""
+    conn = _connect()
+    try:
+        conn.execute("UPDATE jobs SET status = ?, error = ?, updated_at = ? "
+                     "WHERE status NOT IN (?, ?)",
+                     (ERROR, "interrupted by restart", time.time(), DONE, ERROR))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def job_dir(job_id: str) -> Path:
     d = settings.db_path.parent / "jobs" / job_id
     d.mkdir(parents=True, exist_ok=True)

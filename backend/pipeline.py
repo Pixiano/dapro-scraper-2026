@@ -1,13 +1,17 @@
 """Job pipeline: collect → analyze (vision) → synthesize → document.
 
-P2 wires the full state machine with stub collectors and a placeholder dossier;
-P3–P7 replace each stage's body without changing this control flow."""
+Collectors are blocking functions (sync Playwright, one Chromium each), so they
+run in worker threads, settings.collect_concurrency at a time. Vision and synthesis
+run one call at a time: the GPU holds one model. Any exception ends the job in
+status "error"; a collector that raises only costs its own source."""
+
+import asyncio
 
 from fastapi.concurrency import run_in_threadpool
 
 from . import jobs, synthesis, vision
 from .collectors import news
-from .collectors.base import classify_url, get_collector
+from .collectors.base import NEWS, SourceArtifact, classify_url, get_collector
 from .config import settings
 
 
@@ -15,16 +19,22 @@ async def _collect(job_id: str, inputs: dict) -> list[dict]:
     jobs.update(job_id, status=jobs.COLLECTING)
     links = inputs.get("links", [])
     entity = (inputs.get("entity_name") or "").strip()
-    artifacts = []
     jdir = jobs.job_dir(job_id)
-    for url in links:
-        collector = get_collector(classify_url(url))
-        artifact = await run_in_threadpool(collector, url, jdir)
-        artifacts.append(artifact.to_dict())
+    sem = asyncio.Semaphore(settings.collect_concurrency)
+
+    async def one(collector, arg: str, platform: str) -> dict:
+        async with sem:
+            try:
+                return (await run_in_threadpool(collector, arg, jdir)).to_dict()
+            except Exception as exc:  # one bad source must not sink the others
+                return SourceArtifact(url=arg, platform=platform, errors=[
+                    f"collector: {type(exc).__name__}: {exc}"]).to_dict()
+
+    tasks = [one(get_collector(p), url, p) for url in links
+             for p in [classify_url(url)]]
     if settings.enable_news and entity:
-        art = await run_in_threadpool(news.collect_for_entity, entity, jdir)
-        artifacts.append(art.to_dict())
-    return artifacts
+        tasks.append(one(news.collect_for_entity, entity, NEWS))
+    return list(await asyncio.gather(*tasks))  # same order as the links
 
 
 async def _analyze(job_id: str, artifacts: list[dict]) -> list[dict]:

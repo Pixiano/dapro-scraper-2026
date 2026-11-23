@@ -25,7 +25,13 @@ def _post(messages: list[dict], max_tokens: int, temperature: float,
                "temperature": temperature, "stream": False}
     if extra:
         payload.update(extra)
-    r = httpx.post(url, json=payload, timeout=900)
+    for last in (False, True):  # one retry on connection errors and timeouts
+        try:
+            r = httpx.post(url, json=payload, timeout=900)
+            break
+        except httpx.TransportError:
+            if last:
+                raise
     r.raise_for_status()
     msg = r.json()["choices"][0]["message"]
     # Return ONLY the final answer channel. Never fall back to reasoning_content:
@@ -60,8 +66,9 @@ def complete(prompt: str, system: str | None = None, max_tokens: int = 1024,
     """Text completion via the synthesis model.
 
     reasoning_effort: gpt-oss reasoning depth ("low"/"medium"/"high"); None uses
-    the config default. Passed through as the OpenAI-compatible field, ignored by
-    models that don't support it.
+    the config default. llama-server ignores a top-level "reasoning_effort" (checked
+    17 Nov 2026: "low" still reasoned until the budget ran out); the gpt-oss chat
+    template only reads it from chat_template_kwargs.
     """
     from ..config import settings
     server.ensure("text")
@@ -70,7 +77,7 @@ def complete(prompt: str, system: str | None = None, max_tokens: int = 1024,
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
     effort = reasoning_effort or settings.llm_reasoning_effort
-    extra: dict = {"reasoning_effort": effort}
+    extra: dict = {"chat_template_kwargs": {"reasoning_effort": effort}}
     if json_mode:  # llama.cpp constrains the answer to valid JSON
         extra["response_format"] = {"type": "json_object"}
     return _post(messages, max_tokens, temperature, extra)

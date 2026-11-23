@@ -9,15 +9,12 @@ there. Thin coverage is the correct, ToS-respecting outcome, not a bug.
 
 Never raises: every failure lands in art.errors and ok stays False."""
 
-import re
 from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from playwright.sync_api import sync_playwright
 
-from ..config import settings
-from .base import TWITTER, SourceArtifact
+from .base import TWITTER, SourceArtifact, screenshot as _screenshot
 from .website import UA, extract_text
 
 _RESERVED = {"i", "home", "explore", "search", "settings", "notifications",
@@ -31,26 +28,6 @@ def _handle_from_url(url: str) -> str | None:
         return None
     h = parts[0].lstrip("@")
     return None if h.lower() in _RESERVED else h
-
-
-def _screenshot(url: str, job_dir: Path, art: SourceArtifact) -> None:
-    shots = job_dir / "screenshots"
-    shots.mkdir(parents=True, exist_ok=True)
-    slug = re.sub(r"[^a-z0-9]+", "-", url.lower()).strip("-")[:40] or "twitter"
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_context(user_agent=UA, locale="en-US",
-                                       viewport={"width": 1280, "height": 1400}).new_page()
-            page.goto(url, wait_until="domcontentloaded",
-                      timeout=settings.social_nav_timeout_ms)
-            page.wait_for_timeout(1800)
-            shot = shots / f"{slug}.png"
-            page.screenshot(path=str(shot))
-            art.screenshots.append(str(shot))
-            browser.close()
-    except Exception as exc:
-        art.errors.append(f"twitter screenshot: {type(exc).__name__}")
 
 
 def collect(url: str, job_dir: Path) -> SourceArtifact:

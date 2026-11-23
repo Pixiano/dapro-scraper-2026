@@ -127,3 +127,107 @@ def test_dossier_prompt_carries_grounding_rules(monkeypatch):
     assert "No notable public information found" in p
     assert seen["effort"] == settings.llm_reasoning_effort
     assert md.endswith("\n")
+
+
+def test_empty_map_reply_retried_at_low_then_source_marked_failed(monkeypatch):
+    efforts = []
+
+    def fake(prompt, **k):
+        if "research dossier" in prompt:
+            return "# Research Dossier — Acme"
+        efforts.append(k["reasoning_effort"])
+        return ""                               # budget spent on reasoning, twice
+
+    monkeypatch.setattr(synthesis.client, "complete", fake)
+    art = _artifact()
+
+    md = synthesis.build_dossier("Acme", [art])
+
+    assert efforts == ["medium", "low"]         # one retry, at low effort
+    assert any(e.startswith("synthesis:") for e in art["errors"])   # job shows it
+    assert "https://acme.io" in md.split("> Note:")[1]              # dossier shows it
+
+
+def test_empty_dossier_raises_after_low_effort_retry(monkeypatch):
+    efforts = []
+
+    def fake(prompt, **k):
+        if "research dossier" not in prompt:
+            return "note"
+        efforts.append(k["reasoning_effort"])
+        return "  "
+
+    monkeypatch.setattr(synthesis.client, "complete", fake)
+    with pytest.raises(RuntimeError, match="empty dossier"):
+        synthesis.build_dossier("Acme", [_artifact()])
+    assert efforts == [settings.llm_reasoning_effort, "low"]
+
+
+def test_quotes_missing_from_the_sources_are_flagged():
+    art = _artifact(text_blocks=[{"label": "main",
+                                  "text": "We sell   robots to\nFactories. Since 2019, worldwide."}],
+                    facts={"og_title": "Acme — robots for everyone"})
+    md = ('Evidence: "we sell robots to factories" [website]\n'
+          'Evidence: “We sell robots ... since 2019” and "Acme - robots for everyone"\n'
+          'Evidence: "Acme earns $5B a year" [website]\n'
+          'A so-called "premium" brand.\n')
+
+    out = synthesis.flag_unverified_quotes(md, [art])
+
+    lines = out.splitlines()
+    assert synthesis.UNVERIFIED not in lines[0]         # case and whitespace ignored
+    assert synthesis.UNVERIFIED not in lines[1]         # elided quote, fact value
+    assert lines[2] == 'Evidence: "Acme earns $5B a year"' + synthesis.UNVERIFIED + " [website]"
+    assert synthesis.UNVERIFIED not in lines[3]         # scare quote left alone
+    assert out.replace(synthesis.UNVERIFIED, "") == md  # nothing deleted
+
+
+def test_client_retries_once_on_connection_error(monkeypatch):
+    import httpx
+    from backend.llm import client
+
+    class Reply:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    calls = []
+
+    def post(url, **k):
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.ConnectError("refused")
+        return Reply()
+
+    monkeypatch.setattr(client.server, "base_url", lambda: "http://x")
+    monkeypatch.setattr(client.httpx, "post", post)
+    assert client._post([], 10, 0.0) == "ok"
+    assert len(calls) == 2
+
+    calls.clear()
+    monkeypatch.setattr(client.httpx, "post",
+                        lambda url, **k: calls.append(url) or (_ for _ in ()).throw(
+                            httpx.ReadTimeout("slow")))
+    with pytest.raises(httpx.ReadTimeout):      # second failure is not swallowed
+        client._post([], 10, 0.0)
+    assert len(calls) == 2
+
+
+def test_reasoning_effort_goes_where_llama_server_reads_it(monkeypatch):
+    """llama-server ignores a top-level reasoning_effort; only the chat template
+    kwargs reach gpt-oss (seen live: "low" still thought until the budget ran out)."""
+    from backend.llm import client
+
+    sent = {}
+
+    def post(messages, max_tokens, temperature, extra):
+        sent.update(extra)
+        return "ok"
+
+    monkeypatch.setattr(client.server, "ensure", lambda role: None)
+    monkeypatch.setattr(client, "_post", post)
+    client.complete("hi", reasoning_effort="low")
+    assert sent["chat_template_kwargs"] == {"reasoning_effort": "low"}
+    assert "reasoning_effort" not in sent

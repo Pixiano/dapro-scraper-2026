@@ -29,7 +29,8 @@ def test_website_collector_live_example_com(tmp_path):
 
     assert art.ok is True
     assert art.text_blocks, "expected at least one extracted text block"
-    assert any("Example Domain" in b["text"] for b in art.text_blocks)
+    # example.com rewrote its page in 2026; "domain" survives both versions.
+    assert any("domain" in b["text"].lower() for b in art.text_blocks)
     assert art.screenshots, "expected at least one screenshot"
     for shot in art.screenshots:
         assert os.path.isfile(shot), f"screenshot path does not exist on disk: {shot}"

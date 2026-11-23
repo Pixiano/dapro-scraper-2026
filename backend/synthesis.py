@@ -1,6 +1,6 @@
 """Synthesis stage: artifacts → one research dossier, via gpt-oss map-reduce.
 
-Three levels, so arbitrarily large sources still fit an 16k context:
+Three levels, so arbitrarily large sources still fit the 40k context:
   map    — each source's content is chunked; every chunk → extracted signals
   reduce — a source's chunk-notes → one per-source brief
   final  — all briefs → the dossier (factual layer + Inferred Insights layer)
@@ -8,15 +8,25 @@ Three levels, so arbitrarily large sources still fit an 16k context:
 The Inferred Insights layer is the point of the product, and also the most
 dangerous: an ungrounded guess would read as authoritative. Every inference must
 carry a confidence and cite the evidence that supports it, and the model is told
-to use only the briefs — never outside knowledge about the entity."""
+to use only the briefs — never outside knowledge about the entity. That part is
+prompt-only; the one check done in code is on direct quotations: a quoted phrase
+that is not in the collected source text is marked unverified in the dossier.
+
+An empty model reply (budget spent on reasoning) is retried once at low effort.
+If a source's notes are still empty the source gets a "synthesis:" error and the
+dossier says so; an empty final dossier raises, so the job ends in error."""
 
 import json
+import re
 from pathlib import Path
 
 from .config import settings
 from .llm import client
 
 _SKIP_FACTS = {"provenance", "methods_attempted", "methods_succeeded", "pages_visited"}
+_NOTHING = "BRIEF: No notable public information was found for this source."
+_QUOTE = re.compile(r'"([^"\n]+)"|“([^”\n]+)”')
+UNVERIFIED = " *(unverified: not verbatim in the sources)*"
 
 MAP_PROMPT = """You are extracting research signals about an entity from ONE source.
 
@@ -129,21 +139,63 @@ def _chunks(text: str, size: int) -> list[str]:
     return out or [""]
 
 
+def _ask(prompt: str, max_tokens: int, effort: str) -> str:
+    """An empty reply means gpt-oss spent the whole budget reasoning: retry once
+    at low effort. Still empty -> "", the caller decides what that means."""
+    out = client.complete(prompt, max_tokens=max_tokens, reasoning_effort=effort).strip()
+    if not out:
+        out = client.complete(prompt, max_tokens=max_tokens,
+                              reasoning_effort="low").strip()
+    return out
+
+
 def summarize_source(artifact: dict) -> str:
     header = _header(artifact)
     text = _source_text(artifact)
     if not text.strip():
-        return f"{header}\nBRIEF: No notable public information was found for this source."
-    notes = [
-        client.complete(MAP_PROMPT.format(header=header, content=ch),
-                        max_tokens=settings.synthesis_map_tokens,
-                        reasoning_effort="medium")
-        for ch in _chunks(text, settings.synthesis_chunk_chars)
-    ]
-    brief = notes[0] if len(notes) == 1 else client.complete(
-        BRIEF_PROMPT.format(header=header, notes="\n\n".join(notes)),
-        max_tokens=settings.synthesis_brief_tokens, reasoning_effort="medium")
-    return f"{header}\nBRIEF:\n{brief.strip()}"
+        return f"{header}\n{_NOTHING}"
+    chunks = _chunks(text, settings.synthesis_chunk_chars)
+    notes = [n for ch in chunks
+             if (n := _ask(MAP_PROMPT.format(header=header, content=ch),
+                           settings.synthesis_map_tokens, "medium"))]
+    if len(notes) < len(chunks):  # shown per source in the UI and noted in the dossier
+        artifact.setdefault("errors", []).append(
+            f"synthesis: the model returned nothing for {len(chunks) - len(notes)} "
+            f"of {len(chunks)} part(s) of this source")
+    if not notes:
+        return f"{header}\n{_NOTHING}"
+    joined = "\n\n".join(notes)
+    # an empty reduce falls back to the notes themselves: longer, but nothing lost
+    brief = joined if len(notes) == 1 else _ask(
+        BRIEF_PROMPT.format(header=header, notes=joined),
+        settings.synthesis_brief_tokens, "medium") or joined
+    return f"{header}\nBRIEF:\n{brief}"
+
+
+def _words(s: str) -> str:
+    return " ".join(re.findall(r"\w+", s.lower()))
+
+
+def flag_unverified_quotes(md: str, artifacts: list[dict]) -> str:
+    """Mark each direct quotation that is not in the collected source text.
+    Compared as lower-case words only, so whitespace, punctuation and quote style
+    do not matter; "a ... b" passes if both halves are present."""
+    # ponytail: exact wording only, so a reworded quote ("we operate" -> "NASA
+    # operates") is flagged like an invented one: about 1 in 5 quotes on the old
+    # dossiers in data/jobs. Quotes under 3 words are skipped as scare quotes, and
+    # an odd number of " on one line mispairs. Fuzzy matching if that is too noisy.
+    hay = _words(" ".join(
+        f"{a.get('url')} {_source_text(a)} "
+        + re.sub(r"\\[nrt]", " ", json.dumps(a.get("facts") or {}, ensure_ascii=False))
+        for a in artifacts) + " No notable public information found")
+
+    def mark(m: re.Match) -> str:
+        parts = [_words(p) for p in re.split(r"\.{3}|…", m.group(1) or m.group(2))]
+        if sum(len(p.split()) for p in parts) < 3 or all(p in hay for p in parts):
+            return m.group(0)
+        return m.group(0) + UNVERIFIED
+
+    return _QUOTE.sub(mark, md)
 
 
 def _entity_name(explicit: str | None, artifacts: list[dict]) -> str:
@@ -162,6 +214,13 @@ def build_dossier(entity_name: str | None, artifacts: list[dict]) -> str:
     briefs = [summarize_source(a) for a in artifacts]
     prompt = DOSSIER_PROMPT.format(
         entity=entity, n=len(artifacts), briefs="\n\n---\n\n".join(briefs))
-    md = client.complete(prompt, max_tokens=settings.synthesis_dossier_tokens,
-                         reasoning_effort=settings.llm_reasoning_effort)
-    return md.strip() + "\n"
+    md = _ask(prompt, settings.synthesis_dossier_tokens, settings.llm_reasoning_effort)
+    if not md:
+        raise RuntimeError("the model returned an empty dossier, even at low reasoning effort")
+    md = flag_unverified_quotes(md, artifacts)
+    lost = [str(a.get("url")) for a in artifacts
+            if any(e.startswith("synthesis:") for e in a.get("errors") or [])]
+    if lost:
+        md += ("\n\n> Note: the model returned nothing for part or all of these sources, "
+               "so their content may be missing above: " + ", ".join(lost))
+    return md + "\n"

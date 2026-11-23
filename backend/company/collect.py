@@ -2,15 +2,19 @@
 
 Sources per entity (company or competitor):
   news    Hacker News (Algolia API, points > HN_MIN_POINTS) + Google News RSS
-  blogs   official blog feed (Wikidata P1581, else probed paths) + Medium feed
+  blogs   official blog feed (Wikidata P1581 or the website: the feed the page
+          links to, else probed paths) + Medium feed
   social  YouTube uploads (Data API when keyed, else the channel RSS feed)
+  releases and filings (not headlines: the report counts them apart)
+          Hugging Face models, new public GitHub repos, SEC 8-K/6-K filings
 
-Every item: {source, title, url, published (ISO date), quarter}. Only items
-whose title names the entity count (collision guard for "Apple", "Meta").
+Every item: {source, title, url, published (ISO date), quarter}. Only news items
+whose headline names the entity count (collision guard for "Apple", "Meta").
 Fail soft: per-source errors are recorded, never raised."""
 
 import email.utils
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urljoin
@@ -21,7 +25,7 @@ from bs4 import BeautifulSoup
 from .. import quota
 from ..collectors import news, youtube
 from ..config import settings
-from . import UA_PLAIN
+from . import UA, UA_PLAIN
 from . import social as social_mod
 from . import wikidata as wd
 
@@ -29,7 +33,19 @@ HN = "https://hn.algolia.com/api/v1/search_by_date"
 HN_MIN_POINTS = 20
 FEED_PATHS = ("/feed", "/rss", "/rss/", "/rss.xml", "/atom.xml", "/feed.xml",
               "/blog/rss.xml", "/news/rss.xml", "/blog/feed")
+NEWS_FULL = 95  # Google News returns at most ~100 items per query
+NEWS_MIN_DAYS = 3  # smallest window a full one is split into; lower = more requests
 YT_MAX_PAGES = 12  # 50 videos/page, 1 quota unit each; stops once past the window start
+HF_API = "https://huggingface.co/api"
+HF_LIMIT = 500  # models per org, newest first: about a year for the busiest (Microsoft)
+GH_PAGES = 4  # 100 repos/page, newest first; Microsoft opens ~100 in six weeks
+SEC_FORMS = ("8-K", "6-K")  # current reports; 6-K: foreign issuers (Wipro), no item codes
+SEC_ITEMS = {"1.01": "material agreement", "1.02": "agreement ended", "1.05": "cybersecurity "
+             "incident", "2.01": "acquisition or sale completed", "2.02": "quarterly results",
+             "2.03": "new debt", "2.05": "restructuring", "2.06": "impairment",
+             "3.01": "listing notice", "5.02": "officer or director change", "5.03": "bylaws "
+             "change", "5.07": "shareholder vote", "7.01": "investor disclosure",
+             "8.01": "other events"}  # 9.01 (exhibits) is on almost every one: left out
 
 
 # ---- quarters ----
@@ -86,6 +102,12 @@ def names_entity(title: str, name: str) -> bool:
     return re.search(rf"(?<![\w]){re.escape(name)}(?![\w])", title, re.I) is not None
 
 
+def headline(it: dict) -> str:
+    """Title without the " - Publisher" suffix Google News adds: "... - Yahoo Finance"
+    does not name Yahoo and "... - AI Business" is not AI news."""
+    return it["title"].removesuffix(" - " + (it.get("publisher") or ""))
+
+
 def _item(source: str, title: str, url: str, d: date | None,
           bounds: list[tuple[str, date, date]], **extra) -> dict | None:
     q = bucket(d, bounds)
@@ -127,24 +149,45 @@ def hacker_news(name: str, bounds, errors: list[str], context: str = "") -> list
     return out
 
 
+def _news_window(query: str, s: date, e: date, client, errors: list[str]) -> list[dict]:
+    """Raw feed items for [s, e). A full reply is a capped sample, so the window is
+    halved and each half refetched, down to NEWS_MIN_DAYS. The halves overlap the
+    parent and each other by a day: entity() dedupes."""
+    # after: may be exclusive; start a day early, dedupe + bucketing absorb the overlap
+    url = news._feed_url(f"{query} after:{s - timedelta(days=1)} before:{e}")
+    text, err = news._fetch(url, client)
+    if err and "429" in err:  # a burst of requests is rate-limited for a few seconds
+        time.sleep(5)
+        text, err = news._fetch(url, client)
+    if err:
+        errors.append(f"google_news: {err}")
+        return []
+    items = news._parse_items(text or "")
+    if len(items) < NEWS_FULL:
+        return items
+    if (e - s).days < 2 * NEWS_MIN_DAYS:
+        # ponytail: the loudest names (OpenAI) fill 100 items in two days; lower NEWS_MIN_DAYS
+        note = "google_news: some periods still hit the 100-item cap, counts there are a sample"
+        if note not in errors:
+            errors.append(note)
+        return items
+    mid = s + (e - s) // 2
+    return (items + _news_window(query, s, mid, client, errors)
+            + _news_window(query, mid, e, client, errors))
+
+
 def google_news(name: str, bounds, errors: list[str], context: str = "") -> list[dict]:
     out = []
-    # one query per month: the feed caps at 100 items per query.
-    # ponytail: very loud names (OpenAI) can still hit 100/month; split weekly if needed
-    for s, e in months(bounds[0][1], bounds[-1][2]):
-        # after: may be exclusive; start a day early, dedupe + bucketing absorb the overlap
-        text, err = news._fetch(news._feed_url(
-            f'"{name}" {context} after:{s - timedelta(days=1)} before:{e}'.replace("  ", " ")))
-        if err:
-            errors.append(f"google_news: {err}")
-            continue
-        for it in news._parse_items(text or ""):
-            if not names_entity(it["title"], name):
-                continue
-            x = _item("google_news", it["title"], it["link"], _parse_date(it["published"]),
-                      bounds, publisher=it["publisher"])
-            if x:
-                out.append(x)
+    with news._client() as client:  # one connection for the whole entity, not one per query
+        # one query per month to start with: the feed caps at 100 items per query
+        for s, e in months(bounds[0][1], bounds[-1][2]):
+            for it in _news_window(f'"{name}" {context}'.strip(), s, e, client, errors):
+                if not names_entity(headline(it), name):
+                    continue
+                x = _item("google_news", it["title"], it["link"], _parse_date(it["published"]),
+                          bounds, publisher=it["publisher"])
+                if x:
+                    out.append(x)
     return out
 
 
@@ -177,14 +220,34 @@ def _try_feed(url: str) -> list[dict] | None:
         return None
 
 
+def _linked_feeds(page: str) -> list[str]:
+    """Feeds a page advertises: <link rel="alternate" type="application/rss+xml" href>."""
+    try:
+        r = _http(page)
+        return [urljoin(str(r.url), str(tag["href"]))
+                for tag in BeautifulSoup(r.text, "html.parser").find_all(
+                    "link", rel="alternate", href=True)
+                if re.search(r"rss|atom", str(tag.get("type") or ""))]
+    except Exception:
+        return []
+
+
+def _feed_candidates(links: dict):
+    """Lazily, cheapest first: the blog URL itself, the feeds the blog and the
+    website link to, and only then the probed paths."""
+    pages = [b for b in (links.get("blog"), links.get("website")) if b]
+    if links.get("blog"):
+        yield links["blog"]
+    for page in pages:
+        yield from _linked_feeds(page)
+    yield from (b.rstrip("/") + p for b in pages for p in FEED_PATHS)
+
+
 def blogs(links: dict, bounds, errors: list[str]) -> tuple[list[dict], str | None]:
     """-> (items, feed URL used). First-party feed first, then Medium."""
     out: list[dict] = []
     used = None
-    bases = [b.rstrip("/") for b in (links.get("blog"), links.get("website")) if b]
-    candidates = ([links["blog"]] if links.get("blog") else []) + \
-        [b + p for b in bases for p in FEED_PATHS]
-    for url in candidates:
+    for url in _feed_candidates(links):
         items = _try_feed(url)
         if items:
             used = url
@@ -244,6 +307,104 @@ def _yt_api(cid: str, bounds) -> list[dict]:
     return out
 
 
+# ---- releases and filings ----
+
+def _hf_org(name: str, links: dict, errors: list[str]) -> str | None:
+    """Wikidata's Hugging Face id; else an org named like the company's GitHub account
+    or its name ("mistralai"), kept only if Hugging Face has verified the org and its
+    display name names the company ("AI at Meta"). Unverified lookalikes are refused."""
+    if links.get("huggingface"):
+        return links["huggingface"].rstrip("/").rsplit("/", 1)[-1]
+    tries = [links["github"].rstrip("/").rsplit("/", 1)[-1]] if links.get("github") else []
+    for org in dict.fromkeys(t.lower() for t in tries + [re.sub(r"[^\w]", "", name)] if t):
+        try:
+            r = _http(f"{HF_API}/organizations/{org}/overview")
+            o = r.json() if r.status_code == 200 else {}
+        except Exception as exc:
+            errors.append(f"huggingface: {type(exc).__name__}: {exc}")
+            return None
+        if o.get("isVerified") and names_entity(o.get("fullname") or "", name):
+            return o["name"]
+    return None
+
+
+def hugging_face(name: str, links: dict, bounds, errors: list[str]) -> tuple[list[dict], str | None]:
+    """-> (model releases, org). Every one is AI by nature; the report counts them apart."""
+    org = _hf_org(name, links, errors)
+    if not org:
+        return [], None
+    try:
+        r = _http(f"{HF_API}/models", author=org, sort="createdAt", direction=-1, limit=HF_LIMIT)
+        r.raise_for_status()
+        models = r.json()
+    except Exception as exc:
+        errors.append(f"huggingface: {type(exc).__name__}: {exc}")
+        return [], org
+    if len(models) == HF_LIMIT and (_parse_date(models[-1].get("createdAt")) or date.max) >= bounds[0][1]:
+        errors.append(f"huggingface: over {HF_LIMIT} models, the oldest quarter is undercounted")
+    return [x for m in models if (x := _item(
+        "huggingface", m["id"], f"https://huggingface.co/{m['id']}",
+        _parse_date(m.get("createdAt")), bounds, likes=m.get("likes") or 0))], org
+
+
+def github_repos(links: dict, bounds, errors: list[str]) -> list[dict]:
+    """New public repos (forks skipped) of the GitHub account on Wikidata."""
+    if not links.get("github"):
+        return []
+    user = links["github"].rstrip("/").rsplit("/", 1)[-1]
+    headers = {"User-Agent": UA_PLAIN, "Accept": "application/vnd.github+json"}
+    if settings.github_token:  # 60 -> 5,000 requests an hour
+        headers["Authorization"] = f"Bearer {settings.github_token}"
+    out: list[dict] = []
+    try:
+        for page in range(1, GH_PAGES + 1):
+            r = httpx.get(f"https://api.github.com/users/{user}/repos", headers=headers, timeout=20,
+                          params={"type": "owner", "sort": "created", "direction": "desc",
+                                  "per_page": 100, "page": page})
+            r.raise_for_status()
+            repos = r.json()
+            out += [x for g in repos if not g.get("fork") and (x := _item(
+                "github", g["full_name"], g["html_url"], _parse_date(g.get("created_at")), bounds,
+                stars=g.get("stargazers_count") or 0, description=g.get("description") or ""))]
+            if len(repos) < 100 or (_parse_date(repos[-1].get("created_at")) or date.min) < bounds[0][1]:
+                break
+        else:
+            errors.append(f"github: over {GH_PAGES * 100} new repos, the oldest quarter is undercounted")
+    except Exception as exc:  # 403 = the hourly limit: set GITHUB_TOKEN
+        errors.append(f"github: {type(exc).__name__}: {exc}")
+    return out
+
+
+def sec_filings(links: dict, bounds, errors: list[str]) -> list[dict]:
+    """8-K/6-K current reports from EDGAR (CIK on Wikidata: US-listed companies only).
+    Not AI news: the report counts them apart and never in the AI share."""
+    if not links.get("sec"):
+        return []
+    cik = links["sec"].rsplit("=", 1)[-1]
+    try:  # SEC refuses requests without a contact in the User-Agent
+        r = httpx.get(f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json",
+                      headers={"User-Agent": UA}, timeout=20)
+        r.raise_for_status()
+        rec = (r.json().get("filings") or {}).get("recent") or {}
+    except Exception as exc:
+        errors.append(f"sec: {type(exc).__name__}: {exc}")
+        return []
+    out = []
+    for form, day, acc, doc, codes in zip(*(rec.get(k) or [] for k in (
+            "form", "filingDate", "accessionNumber", "primaryDocument", "items"))):
+        d = _parse_date(day)
+        if form not in SEC_FORMS or not d:
+            continue
+        what = ", ".join(SEC_ITEMS.get(c, f"item {c}") for c in codes.split(",")
+                         if c and c != "9.01") or "foreign issuer report"
+        x = _item("sec", f"Form {form} filed {d.day} {d:%b %Y}: {what}",
+                  f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc.replace('-', '')}/{doc}",
+                  d, bounds, form=form)
+        if x:
+            out.append(x)
+    return out
+
+
 # ---- per entity ----
 
 def entity(e: dict, bounds, social: bool = False) -> dict:
@@ -254,8 +415,12 @@ def entity(e: dict, bounds, social: bool = False) -> dict:
     links = e.get("links") or {}
     blog_items, feed = blogs(links, bounds, errors)
     ctx = e.get("context") or ""  # "crypto": required extra word for a shared name
+    hf, org = hugging_face(name, links, bounds, errors)
+    if org and not links.get("huggingface"):  # found on the Hub, not on Wikidata
+        links = {**links, "huggingface": f"https://huggingface.co/{org}"}
     items = (hacker_news(name, bounds, errors, ctx) + google_news(name, bounds, errors, ctx)
-             + blog_items + youtube_videos(links.get("youtube"), bounds, errors))
+             + blog_items + youtube_videos(links.get("youtube"), bounds, errors)
+             + hf + github_repos(links, bounds, errors) + sec_filings(links, bounds, errors))
     seen: set = set()
     uniq = []
     for it in items:

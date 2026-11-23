@@ -27,12 +27,18 @@ def _feed_url(query: str) -> str:
     return _FEED.format(q=quote_plus(query))
 
 
-def _fetch(url: str) -> tuple[str | None, str | None]:
-    """(text, error) — never raises."""
+def _client() -> httpx.Client:
+    return httpx.Client(headers={"User-Agent": UA}, timeout=15, follow_redirects=True)
+
+
+def _fetch(url: str, client: httpx.Client | None = None) -> tuple[str | None, str | None]:
+    """(text, error) — never raises. client: one to reuse across many requests."""
     try:
-        with httpx.Client(headers={"User-Agent": UA}, timeout=15,
-                          follow_redirects=True) as c:
-            r = c.get(url)
+        if client:
+            r = client.get(url)
+        else:
+            with _client() as c:
+                r = c.get(url)
         if r.status_code != 200:
             return None, f"news fetch: HTTP {r.status_code}"
         return r.text, None

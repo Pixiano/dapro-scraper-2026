@@ -26,6 +26,10 @@ LINKS = {
     "P2013": ("facebook", "https://www.facebook.com/{}"),
     "P1581": ("blog", None),
     "P3899": ("medium", "https://medium.com/@{}"),
+    # releases and filings (collect.py): the id is read back from the URL
+    "P12201": ("huggingface", "https://huggingface.co/{}"),
+    "P2037": ("github", "https://github.com/{}"),
+    "P5531": ("sec", "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={}"),
 }
 SOCIAL = {"P2397", "P2003", "P2013"}
 # ponytail: candidate cap keeps pageview calls bounded; raise if categories look thin
@@ -46,7 +50,12 @@ def _fetch(url: str, errors: list[str], params: dict) -> dict:
         if r.status_code == 404:
             return {}
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+        # the action API reports errors (maxlag, ratelimited, bad ids) as HTTP 200 with
+        # an "error" body: raise, so it is reported and never cached for 30 days
+        if isinstance(data, dict) and "error" in data:
+            raise RuntimeError(data["error"])
+        return data
     except Exception as exc:
         errors.append(f"{url.split('/')[2]}: {type(exc).__name__}: {exc}")
         return {}
@@ -55,11 +64,15 @@ def _fetch(url: str, errors: list[str], params: dict) -> dict:
 # "network": Deloitte is a "professional services network"; without it the search
 # fell through to "Deloitte Netherlands" (described as "company")
 COMPANY = re.compile(r"\b(company|corporation|conglomerate|organi[sz]ation|enterprise|network|"
-                     r"firm|manufacturer|developer|publisher|studio|brand|startup)\b", re.I)
+                     r"firm|manufacturer|developer|publisher|studio(?! album)|brand|startup)\b", re.I)
 # ponytail: word list for "this is a company or something a company sells"
 BUSINESS = re.compile(COMPANY.pattern[:-3] + r"|software|app|application|chatbot|service|"
                       r"platform|website|search engine|operating system|marketplace|"
                       r"retailer|provider)\b", re.I)
+# Works and places that have a maker or developer but are not what a rival sells:
+# "Code (2008 video game)", "Jolly Rancher Remix (roller coaster)", "Williams College"
+WORK = re.compile(r"\b(album|single by|song|video game|film|television series|episode|novel|"
+                  r"roller coaster|college|university|ship)\b", re.I)
 
 
 def _norm(s: str) -> str:
@@ -70,17 +83,37 @@ def search(name: str, errors: list[str], prefer_company: bool = True,
            exact: bool = False, business: bool = False) -> str | None:
     """Top hit; by default prefer one described as a company ("Netflix" the
     service ranks above Netflix the media company). exact: only hits whose
-    matched label/alias equals the name ("Teams Worth It" must not -> a film).
-    business: prefer the first hit described as a company or a product, so a
-    rival named "Apple" is the company and "Netflix" stays the service."""
+    matched label/alias equals the name, or whose label starts or ends with it
+    as whole words ("Meta" -> "Meta Platforms", "Bing" -> "Microsoft Bing").
+    business: the first hit that is a business with an English Wikipedia page,
+    so a rival named "Apple" is the company, not the fruit or a given name."""
     data = _get(API, errors, action="wbsearchentities", search=name,
                 language="en", type="item", limit=5, format="json")
-    hits = [h for h in data.get("search") or [] if not exact
-            or _norm((h.get("match") or {}).get("text") or "") == _norm(name)]
-    pat = BUSINESS if business else COMPANY if prefer_company else None
-    for h in hits if pat else []:
-        if pat and pat.search(h.get("description") or ""):
-            return h["id"]
+    n = _norm(name)
+
+    def same(h: dict) -> bool:
+        return _norm((h.get("match") or {}).get("text") or "") == n
+
+    def named(h: dict) -> bool:
+        lbl = f" {_norm(h.get('label') or '')} "
+        return same(h) or lbl.startswith(f" {n} ") or lbl.endswith(f" {n} ")
+    hits = [h for h in data.get("search") or [] if not exact or named(h)]
+    if business and hits:
+        # the entity decides, not the one-line description: same test as _verify.
+        # Tried in order: described as a business before business facts only ("Mistral"
+        # the software before the ship, which has a manufacturer), then the name
+        # itself before a longer label
+        ents = get_entities([h["id"] for h in hits], errors)
+        for h in sorted(hits, key=lambda h: (not BUSINESS.search(
+                h.get("description") or ""), not same(h))):
+            e = ents.get(h["id"]) or {}
+            if (enwiki(e) and is_business(e) and not is_generic(e)
+                    and "Q5" not in claim_values(e, "P31")):
+                return h["id"]
+    elif prefer_company:
+        for h in hits:
+            if COMPANY.search(h.get("description") or ""):
+                return h["id"]
     return hits[0]["id"] if hits else None
 
 
@@ -176,10 +209,10 @@ def is_generic(ent: dict) -> bool:
 def is_business(ent: dict) -> bool:
     """A company, brand or product, not a band, a surname or a US state: its
     description says so, or it carries business facts (industry, products, maker,
-    developer, stock listing). ponytail: heuristic; extend COMPANY when a real
-    rival is turned away."""
+    developer, stock listing) and is not described as a work (WORK). ponytail:
+    heuristic; extend COMPANY when a real rival is turned away, WORK when junk verifies."""
     desc = (ent.get("descriptions") or {}).get("en", {}).get("value") or ""
-    return bool(BUSINESS.search(desc)) or any(
+    return bool(BUSINESS.search(desc)) or not WORK.search(desc) and any(
         claim_values(ent, p) for p in ("P452", "P1056", "P176", "P178", "P414"))
 
 
